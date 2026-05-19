@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
+using System.Collections.Generic;
 
 #nullable disable
 
@@ -97,6 +98,56 @@ namespace Microsoft.Build.Strict
             }
             string disable = Environment.GetEnvironmentVariable(layerDisableEnvVar);
             return string.IsNullOrEmpty(disable);
+        }
+
+        /// <summary>Per-layer kill-switch env var: extra input file extensions to include
+        /// in every strict-mode cache key. Semicolon-separated, leading dot optional, case-insensitive
+        /// (e.g. <c>".tt;proto;.tsx"</c>). Equivalent to extending the layer's built-in extension
+        /// whitelist. Re-read on every call so MSBuild Server picks up changes.</summary>
+        internal const string EnvExtraInputExtensions = "MSBUILDSTRICTEXTRAINPUTEXTENSIONS";
+
+        /// <summary>Cache of the parsed <see cref="EnvExtraInputExtensions"/> set, keyed by the
+        /// raw env-var string so a change between submissions invalidates the cache.</summary>
+        private static (string Raw, HashSet<string> Set) s_extraExtsCache = (null, _emptyExtSet);
+        private static readonly HashSet<string> _emptyExtSet = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Returns the parsed <see cref="EnvExtraInputExtensions"/> set (lower-cased, dot-prefixed,
+        /// deduped). Empty set when the env var is unset. Layers should union this with their own
+        /// built-in extension whitelist.
+        /// </summary>
+        internal static HashSet<string> GetExtraInputExtensions()
+        {
+            string raw = Environment.GetEnvironmentVariable(EnvExtraInputExtensions);
+            var cached = s_extraExtsCache;
+            if (string.Equals(cached.Raw, raw, StringComparison.Ordinal))
+            {
+                return cached.Set;
+            }
+            HashSet<string> set;
+            if (string.IsNullOrEmpty(raw))
+            {
+                set = _emptyExtSet;
+            }
+            else
+            {
+                set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string part in raw.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    string trimmed = part.Trim();
+                    if (trimmed.Length == 0)
+                    {
+                        continue;
+                    }
+                    if (trimmed[0] != '.')
+                    {
+                        trimmed = "." + trimmed;
+                    }
+                    set.Add(trimmed);
+                }
+            }
+            s_extraExtsCache = (raw, set);
+            return set;
         }
 
         /// <summary>

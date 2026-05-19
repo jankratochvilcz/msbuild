@@ -28,6 +28,7 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             _env.SetEnvironmentVariable(StrictModeSettings.EnvVarName, null);
             _env.SetEnvironmentVariable(StrictModeSettings.EnvDisableProjectCache, null);
             _env.SetEnvironmentVariable(StrictModeSettings.EnvDisableSolutionFastSkip, null);
+            _env.SetEnvironmentVariable(StrictModeSettings.EnvExtraInputExtensions, null);
         }
 
         public void Dispose() => _env.Dispose();
@@ -195,6 +196,58 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             StrictModeSettings.ResolveLevel().ToString().ShouldBe("Off");
             StrictModeSettings.IsLayerEnabled(null, StrictModeSettings.EnvDisableProjectCache).ShouldBeFalse();
             StrictModeSettings.IsLayerEnabled(null, StrictModeSettings.EnvDisableSolutionFastSkip).ShouldBeFalse();
+        }
+
+        // ---------------------------------------------------------------------
+        // GetExtraInputExtensions: MSBUILDSTRICTEXTRAINPUTEXTENSIONS escape hatch
+        // ---------------------------------------------------------------------
+
+        [Fact]
+        public void GetExtraInputExtensions_EmptyWhenEnvVarUnset()
+        {
+            _env.SetEnvironmentVariable(StrictModeSettings.EnvExtraInputExtensions, null);
+            StrictModeSettings.GetExtraInputExtensions().Count.ShouldBe(0);
+
+            _env.SetEnvironmentVariable(StrictModeSettings.EnvExtraInputExtensions, "");
+            StrictModeSettings.GetExtraInputExtensions().Count.ShouldBe(0);
+        }
+
+        [Fact]
+        public void GetExtraInputExtensions_ParsesSemicolonAndCommaSeparatedValues()
+        {
+            _env.SetEnvironmentVariable(StrictModeSettings.EnvExtraInputExtensions, ".tt;proto,.tsx; .yaml ");
+            var ext = StrictModeSettings.GetExtraInputExtensions();
+            ext.ShouldContain(".tt");
+            ext.ShouldContain(".proto");
+            ext.ShouldContain(".tsx");
+            ext.ShouldContain(".yaml");
+            ext.Count.ShouldBe(4);
+        }
+
+        [Fact]
+        public void GetExtraInputExtensions_NormalisesDotPrefixAndCaseInsensitive()
+        {
+            _env.SetEnvironmentVariable(StrictModeSettings.EnvExtraInputExtensions, "TT;.Proto");
+            var ext = StrictModeSettings.GetExtraInputExtensions();
+            ext.ShouldContain(".tt");   // lower-case lookup via case-insensitive comparer
+            ext.ShouldContain(".TT");   // case-insensitive
+            ext.ShouldContain(".proto");
+            ext.ShouldContain(".PROTO");
+        }
+
+        [Fact]
+        public void GetExtraInputExtensions_PicksUpRuntimeChanges_ViaCacheKey()
+        {
+            _env.SetEnvironmentVariable(StrictModeSettings.EnvExtraInputExtensions, ".tt");
+            StrictModeSettings.GetExtraInputExtensions().ShouldContain(".tt");
+
+            _env.SetEnvironmentVariable(StrictModeSettings.EnvExtraInputExtensions, ".proto");
+            var ext = StrictModeSettings.GetExtraInputExtensions();
+            ext.ShouldContain(".proto");
+            ext.Contains(".tt").ShouldBeFalse();
+
+            _env.SetEnvironmentVariable(StrictModeSettings.EnvExtraInputExtensions, null);
+            StrictModeSettings.GetExtraInputExtensions().Count.ShouldBe(0);
         }
     }
 }

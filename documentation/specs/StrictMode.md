@@ -56,7 +56,46 @@ consolidation introduced the following intentional behaviour changes:
 Both changes are gated behind the strict-mode opt-in itself, so they cannot affect a build with
 `MSBUILDSTRICTMODE` unset.
 
-## Environment variables in cache keys
+## Source-file input set
+
+Both the project-level cache (`StrictProjectCache`) and the solution-level fast-skip cache
+(`StrictSolutionFastSkip`) hash a fixed list of file extensions when computing their input
+fingerprints. The list intentionally errs on the side of "include too much" — extra files in the
+key only cost a few SHA-256 cycles, but a missed input is a silent staleness bug.
+
+The built-in set covers managed languages (`.cs`, `.vb`, `.fs[i|x]`, `.razor`, `.cshtml`,
+`.vbhtml`, `.xaml`, `.axaml`), ASP.NET classic / WCF authoring (`.aspx`, `.ascx`, `.master`,
+`.svc`, `.asmx`, `.ashx`), native / interop (`.c`, `.cpp`, `.cc`, `.cxx`, `.h`, `.hpp`, `.hxx`,
+`.idl`, `.def`, `.rc`), TypeScript / JavaScript (`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs`),
+T4 (`.tt`, `.t4`), gRPC / Protobuf (`.proto`), resources and data (`.resx`, `.resw`, `.licx`,
+`.settings`, `.json`, `.xml`, `.yaml`, `.yml`, `.md`), project & MSBuild files (`.csproj`,
+`.vbproj`, `.fsproj`, `.vcxproj`, `.sqlproj`, `.shproj`, `.props`, `.targets`, `.tasks`,
+`.overridetasks`, `.sln`, `.slnx`, `.slnf`, `.config`, `.editorconfig`, `.rsp`), and common
+embedded image assets (`.png`, `.bmp`, `.jpg`, `.jpeg`, `.gif`, `.ico`, `.cur`). Both layers
+share the same set; if you discover an extension that should be in this list, add it to **both**
+`StrictProjectCache.s_sourceExts` and `StrictSolutionFastSkip.s_inputExts` to keep them in sync.
+
+### Escape hatch: `MSBUILDSTRICTEXTRAINPUTEXTENSIONS`
+
+Out-of-tree SDKs and bespoke builds can extend the input set at runtime with the
+`MSBUILDSTRICTEXTRAINPUTEXTENSIONS` environment variable. The value is a semicolon- (or comma-)
+separated list of file extensions; a leading dot is optional and matching is case-insensitive:
+
+```sh
+export MSBUILDSTRICTEXTRAINPUTEXTENSIONS=".sdf;dgml;.fbs"
+```
+
+The extensions are unioned with the built-in set on every cache-key computation, so a single env
+var update applied to a build process is picked up immediately (no need to restart MSBuild
+Server). Re-reads are amortised by a 1-entry cache keyed on the raw env-var string, so unchanged
+values cost a single ordinal string compare per call.
+
+> Long-term direction (tracked by issue #6): the project-level layer should ultimately drive its
+> input set from the project's evaluated `@(Compile)`, `@(EmbeddedResource)`, `@(Content)`,
+> `@(None)`, `@(AdditionalFiles)`, and `@(AnalyzerReference)` items. That requires re-architecting
+> the pre-evaluation fast path and is out of scope of the escape hatch.
+
+
 
 Strict Mode hashes a configurable allow-list of environment variables into its solution fast-skip, project cache,
 and target cache keys. Use `$(StrictModeCacheKeyEnvVars)` to override the list for a project. The default value is:

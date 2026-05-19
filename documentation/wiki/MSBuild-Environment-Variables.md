@@ -55,3 +55,5 @@ The Strict Mode feature (see [`documentation/specs/StrictMode.md`](../specs/Stri
   - If set to a writable path, every Strict Mode cache event (hit / miss / store) is appended as one JSON object per line. Schema is documented in `documentation/specs/StrictMode.md`. Multiple MSBuild nodes (entry + workers) share the file safely. Telemetry must never break a build; all errors inside the sink are swallowed.
 - `MSBUILDSTRICTTELEMETRYITER`
   - Included verbatim as the `iteration` field on every telemetry line so a single JSONL file can host multiple iterations of the same scenario (e.g. for the bench harness).
+- `MSBUILDSTRICTEXTRAINPUTEXTENSIONS`
+  - Semicolon- (or comma-) separated list of extra file extensions whose content should be hashed into every Strict Mode cache key, in addition to the built-in set. Leading dot is optional and matching is case-insensitive (e.g. `".tt;proto;.tsx"`). Intended for out-of-tree SDKs and bespoke builds whose inputs use extensions the built-in list does not yet cover. Picked up immediately by long-lived MSBuild Server nodes.

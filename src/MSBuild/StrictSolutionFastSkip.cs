@@ -35,14 +35,33 @@ namespace Microsoft.Build.Strict
     {
         private const string CacheDirName = ".strict-fastskip";
 
-        // Source/project files whose changes must invalidate the cache.
+        // Source/project files whose changes must invalidate the cache. The set covers the common
+        // build inputs across the SDKs we ship for; additional extensions can be appended at
+        // runtime via the MSBUILDSTRICTEXTRAINPUTEXTENSIONS env var (see
+        // StrictModeSettings.GetExtraInputExtensions).
         private static readonly string[] s_inputExts =
         {
-            ".cs", ".vb", ".fs", ".fsx", ".razor", ".cshtml", ".aspx", ".ascx",
-            ".csproj", ".vbproj", ".fsproj", ".sln", ".slnx",
+            // Managed languages and razor / blazor / xaml authoring
+            ".cs", ".vb", ".fs", ".fsx", ".fsi", ".razor", ".cshtml", ".vbhtml", ".xaml", ".axaml",
+            // ASP.NET classic / WCF authoring
+            ".aspx", ".ascx", ".master", ".svc", ".asmx", ".ashx",
+            // Native / interop
+            ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx", ".idl", ".def", ".rc",
+            // TypeScript / JavaScript (BlazorWASM, JSInterop, npm-driven tooling)
+            ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+            // T4 / code generation
+            ".tt", ".t4",
+            // gRPC / Protobuf
+            ".proto",
+            // Resources / data / docs commonly embedded as build inputs
+            ".resx", ".resw", ".licx", ".settings", ".json", ".xml", ".yaml", ".yml", ".md",
+            // Project / props / targets / tasks / response files
+            ".csproj", ".vbproj", ".fsproj", ".vcxproj", ".sqlproj", ".shproj",
             ".props", ".targets", ".tasks", ".overridetasks",
-            ".json", ".xml", ".config", ".resx", ".xaml",
-            ".editorconfig", ".rsp",
+            ".sln", ".slnx", ".slnf",
+            ".config", ".editorconfig", ".rsp",
+            // Image / cursor / icon assets often embedded
+            ".png", ".bmp", ".jpg", ".jpeg", ".gif", ".ico", ".cur",
         };
 
         // Substrings to ignore in input enumeration (case-insensitive).
@@ -311,7 +330,12 @@ namespace Microsoft.Build.Strict
                     {
                         if (string.Equals(ext, s_inputExts[i], StringComparison.OrdinalIgnoreCase)) { matched = true; break; }
                     }
-                    if (!matched) { return; }
+                    if (!matched)
+                    {
+                        // Honour the runtime escape hatch ($MSBUILDSTRICTEXTRAINPUTEXTENSIONS).
+                        var extra = Microsoft.Build.Strict.StrictModeSettings.GetExtraInputExtensions();
+                        if (extra.Count == 0 || !extra.Contains(ext)) { return; }
+                    }
                 }
                 try
                 {

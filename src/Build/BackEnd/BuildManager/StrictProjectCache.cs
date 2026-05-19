@@ -94,10 +94,32 @@ namespace Microsoft.Build.Execution
         };
 
         // "Source-like" extensions that should invalidate the cache when their content changes.
+        // The set covers the common build inputs across the SDKs we ship for; additional
+        // extensions can be appended at runtime via the MSBUILDSTRICTEXTRAINPUTEXTENSIONS env var
+        // (see StrictModeSettings.GetExtraInputExtensions).
         private static readonly HashSet<string> s_sourceExts = new(StringComparer.OrdinalIgnoreCase)
         {
-            ".cs", ".vb", ".fs", ".fsx", ".resx", ".razor", ".cshtml", ".xaml",
-            ".csproj", ".vbproj", ".fsproj", ".props", ".targets", ".json", ".config",
+            // Managed languages and razor / blazor / xaml authoring
+            ".cs", ".vb", ".fs", ".fsx", ".fsi", ".razor", ".cshtml", ".vbhtml", ".xaml", ".axaml",
+            // ASP.NET classic / WCF authoring
+            ".aspx", ".ascx", ".master", ".svc", ".asmx", ".ashx",
+            // Native / interop
+            ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx", ".idl", ".def", ".rc",
+            // TypeScript / JavaScript (BlazorWASM, JSInterop, npm-driven tooling)
+            ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+            // T4 / code generation
+            ".tt", ".t4",
+            // gRPC / Protobuf
+            ".proto",
+            // Resources / data / docs commonly embedded as build inputs
+            ".resx", ".resw", ".licx", ".settings", ".json", ".xml", ".yaml", ".yml", ".md",
+            // Project / props / targets / tasks / response files
+            ".csproj", ".vbproj", ".fsproj", ".vcxproj", ".sqlproj", ".shproj",
+            ".props", ".targets", ".tasks", ".overridetasks",
+            ".sln", ".slnx", ".slnf",
+            ".config", ".editorconfig", ".rsp",
+            // Image / cursor / icon assets often embedded
+            ".png", ".bmp", ".jpg", ".jpeg", ".gif", ".ico", ".cur",
         };
 
         // Directories whose content is irrelevant to the cache key.
@@ -912,7 +934,7 @@ namespace Microsoft.Build.Execution
                     else if (File.Exists(entry))
                     {
                         string ext = Path.GetExtension(entry);
-                        if (s_sourceExts.Contains(ext))
+                        if (s_sourceExts.Contains(ext) || StrictModeSettings.GetExtraInputExtensions().Contains(ext))
                         {
                             AddSignature(entry, projDir, sink, seen);
                         }
