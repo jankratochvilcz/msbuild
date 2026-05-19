@@ -60,6 +60,7 @@ namespace Microsoft.Build.Execution
     {
         private const string CacheDirName = ".strict-project";
         private const int ManifestSchemaVersion = 1;
+        private static readonly TimeSpan s_orphanTempSweepAge = TimeSpan.FromHours(1);
 
         // Targets we are willing to synthesise from cache. These are pure "describe what the
         // project would produce" or terminal "do the build" targets that have well-defined,
@@ -1262,6 +1263,7 @@ namespace Microsoft.Build.Execution
             if (!string.IsNullOrEmpty(dir))
             {
                 Directory.CreateDirectory(dir);
+                SweepStaleTempSiblings(manifestPath, dir);
             }
             // Multi-proc safety: write to a unique temp sibling then atomically rename.
             string tmp = manifestPath + ".tmp." + System.Diagnostics.Process.GetCurrentProcess().Id + "." + Guid.NewGuid().ToString("N");
@@ -1349,6 +1351,33 @@ namespace Microsoft.Build.Execution
                 File.Move(tmp, manifestPath);
             }
 #endif
+        }
+
+        private static void SweepStaleTempSiblings(string manifestPath, string dir)
+        {
+            try
+            {
+                DateTime cutoff = DateTime.UtcNow - s_orphanTempSweepAge;
+                string pattern = Path.GetFileName(manifestPath) + ".tmp.*";
+                foreach (string tmpPath in Directory.EnumerateFiles(dir, pattern, SearchOption.TopDirectoryOnly))
+                {
+                    try
+                    {
+                        if (File.GetLastWriteTimeUtc(tmpPath) <= cutoff)
+                        {
+                            File.Delete(tmpPath);
+                        }
+                    }
+                    catch
+                    {
+                        // Best-effort cleanup only.
+                    }
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup only.
+            }
         }
 
         internal sealed class CachedTargetResult

@@ -146,8 +146,8 @@ Notes:
   the next successful build. There is **no** migration code today; bumping the schema version is the only supported
   "invalidate the world" operation.
 - Manifest writes are atomic: every layer writes to `<final>.tmp.<pid>.<guid>` and then `File.Move(overwrite:true)`
-  to publish. A crashed build leaves a `.tmp.<pid>.<guid>` orphan that no future build reads. (Orphan cleanup is
-  tracked by issue #10.)
+  to publish. For `StrictProjectCache`, a subsequent save best-effort deletes sibling temp manifests older than 1 hour
+  before publishing the new manifest, so crash leftovers do not accumulate indefinitely.
 - The target cache uses a content-addressed directory tree per `(target, key)` rather than a single manifest file;
   the schema version is the `v1\` path segment under `.strict-cache\`, and the `.ok` marker is the commit signal —
   if it is absent, the directory is treated as a partial write and ignored. Builds only read the current schema

@@ -244,6 +244,34 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
         }
 
         [Fact]
+        public void Store_SweepsOnlyStaleManifestTemps()
+        {
+            var globals = new Dictionary<string, string>();
+            var targets = new[] { "Build" };
+
+            StrictProjectCache.TryHit(_projectPath, globals, targets, BuildRequestDataFlags.None, out string cacheKey, out _).ShouldBeNull();
+
+            string manifestDir = Path.Combine(_projectDir, "obj", ".strict-project");
+            string manifestPath = Path.Combine(manifestDir, cacheKey + ".manifest");
+            string staleTemp = manifestPath + ".tmp.123.old";
+            string freshTemp = manifestPath + ".tmp.456.new";
+
+            Directory.CreateDirectory(manifestDir);
+            File.WriteAllText(staleTemp, "stale");
+            File.SetLastWriteTimeUtc(staleTemp, DateTime.UtcNow.AddHours(-2));
+            File.WriteAllText(freshTemp, "fresh");
+            File.SetLastWriteTimeUtc(freshTemp, DateTime.UtcNow.AddMinutes(-5));
+
+            StrictProjectCache.RegisterMiss(101, _projectPath, globals, targets, cacheKey);
+            StrictProjectCache.MaybeStoreOnCompletion(101, MakeSuccessResult(("Build", new[] { ("out.txt", Array.Empty<(string, string)>()) })));
+
+            File.Exists(staleTemp).ShouldBeFalse();
+            File.Exists(freshTemp).ShouldBeTrue();
+            StrictProjectCache.TryHit(_projectPath, globals, targets, BuildRequestDataFlags.None, out _, out string reason).ShouldNotBeNull();
+            reason.ShouldBe("hit");
+        }
+
+        [Fact]
         public void MissingRequestedTarget_IsNotStored()
         {
             var globals = new Dictionary<string, string>();
