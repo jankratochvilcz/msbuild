@@ -721,6 +721,8 @@ namespace Microsoft.Build.Execution
                 sb.Append("t=<default>\n");
             }
 
+            StrictCacheKeyEnvironment.AppendFingerprint(sb, StrictCacheKeyEnvironment.GetConfiguredValue(globalProperties));
+
             for (int i = 0; i < sigInputs.Count; i++)
             {
                 SignatureInput si = sigInputs[i];

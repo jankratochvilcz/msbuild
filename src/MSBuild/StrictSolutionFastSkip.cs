@@ -278,12 +278,7 @@ namespace Microsoft.Build.Strict
                 keys.Sort(StringComparer.OrdinalIgnoreCase);
                 foreach (var k in keys) { sb.Append("g:").Append(k).Append('=').Append(globalProperties[k]).Append('\n'); }
             }
-            // A few env vars that meaningfully affect builds.
-            foreach (var e in new[] { "Configuration", "Platform", "RuntimeIdentifier", "TargetFramework", "TargetFrameworks" })
-            {
-                string v = Environment.GetEnvironmentVariable(e);
-                if (!string.IsNullOrEmpty(v)) { sb.Append("e:").Append(e).Append('=').Append(v).Append('\n'); }
-            }
+            StrictCacheKeyEnvironment.AppendFingerprint(sb, StrictCacheKeyEnvironment.GetConfiguredValue(globalProperties));
             byte[] h;
             using (var sha = SHA256.Create())
             {

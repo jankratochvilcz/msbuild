@@ -20,11 +20,13 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
     /// </summary>
     public sealed class StrictTargetCache_Tests : IDisposable
     {
+        private readonly ITestOutputHelper _output;
         private readonly TestEnvironment _env;
 
         public StrictTargetCache_Tests(ITestOutputHelper output)
         {
-            _env = TestEnvironment.Create(output);
+            _output = output;
+            _env = TestEnvironment.Create(_output);
             // Make sure no inherited env var leaks into these tests.
             _env.SetEnvironmentVariable("MSBUILDSTRICTMODE", null);
             _env.SetEnvironmentVariable("MSBUILDSTRICTCACHEMAXBYTES", null);
@@ -195,6 +197,71 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
         }
 
+        [Fact]
+        public void E2E_AllowListedEnvironmentVariableChange_InvalidatesCache()
+        {
+            const string envVarName = "STRICT_TARGET_CACHE_ENV";
+            _env.SetEnvironmentVariable(envVarName, "one");
+
+            var (projectPath, _, outputPath) = WriteDemoProject(
+                strictMode: "warn",
+                writeUndeclared: false,
+                cacheKeyEnvVars: envVarName,
+                consumedEnvironmentVariable: envVarName);
+
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+            File.ReadAllText(outputPath).Trim().ShouldBe("one");
+
+            File.Delete(outputPath);
+            _env.SetEnvironmentVariable(envVarName, "two");
+
+            MockLogger logger = BuildOnce(projectPath);
+            logger.AssertLogContains("INSIDE_TARGET_BODY");
+            File.ReadAllText(outputPath).Trim().ShouldBe("two");
+        }
+
+        [Fact]
+        public void E2E_NonListedEnvironmentVariableChange_DoesNotInvalidateCache()
+        {
+            const string envVarName = "STRICT_TARGET_CACHE_ENV_IGNORE";
+            _env.SetEnvironmentVariable(envVarName, "one");
+
+            var (projectPath, _, outputPath) = WriteDemoProject(strictMode: "warn", writeUndeclared: false);
+
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+
+            File.Delete(outputPath);
+            _env.SetEnvironmentVariable(envVarName, "two");
+
+            MockLogger logger = BuildOnce(projectPath);
+            logger.AssertLogDoesntContain("INSIDE_TARGET_BODY");
+            File.Exists(outputPath).ShouldBeTrue();
+        }
+
+        [Fact]
+        public void E2E_VolatileAllowListedEnvironmentVariableChange_DoesNotInvalidateCache()
+        {
+            const string envVarName = "DOTNET_CLI_TELEMETRY_SESSIONID";
+            _env.SetEnvironmentVariable(envVarName, "one");
+
+            var (projectPath, _, outputPath) = WriteDemoProject(
+                strictMode: "warn",
+                writeUndeclared: false,
+                cacheKeyEnvVars: "DOTNET_*",
+                consumedEnvironmentVariable: "DOTNET_ROOT");
+
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+            File.ReadAllText(outputPath).Trim().ShouldBe(Environment.GetEnvironmentVariable("DOTNET_ROOT") ?? string.Empty);
+
+            File.Delete(outputPath);
+            _env.SetEnvironmentVariable(envVarName, "two");
+
+            MockLogger logger = BuildOnce(projectPath);
+            logger.AssertLogDoesntContain("INSIDE_TARGET_BODY");
+            File.Exists(outputPath).ShouldBeTrue();
+            File.ReadAllText(outputPath).Trim().ShouldBe(Environment.GetEnvironmentVariable("DOTNET_ROOT") ?? string.Empty);
+        }
+
         // ---------------------------------------------------------------------
         // Helpers
         // ---------------------------------------------------------------------
@@ -209,7 +276,9 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
         private (string projectPath, string inputPath, string outputPath) WriteDemoProject(
             string strictMode,
             bool writeUndeclared,
-            string exemptTargets = null)
+            string exemptTargets = null,
+            string cacheKeyEnvVars = null,
+            string consumedEnvironmentVariable = null)
         {
             var folder = _env.CreateFolder().Path;
             string inputPath = Path.Combine(folder, "input.txt");
@@ -223,6 +292,15 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             string exemptProp = exemptTargets is null
                 ? string.Empty
                 : $"<MSBuildStrictExemptTargets>{exemptTargets}</MSBuildStrictExemptTargets>";
+            string cacheKeyEnvVarsProp = cacheKeyEnvVars is null
+                ? string.Empty
+                : $"<StrictModeCacheKeyEnvVars>{cacheKeyEnvVars}</StrictModeCacheKeyEnvVars>";
+            string consumedEnvProp = consumedEnvironmentVariable is null
+                ? string.Empty
+                : $"<ConsumedEnvironmentValue>$([System.Environment]::GetEnvironmentVariable('{consumedEnvironmentVariable}'))</ConsumedEnvironmentValue>";
+            string outputLines = consumedEnvironmentVariable is null
+                ? "produced"
+                : "$(ConsumedEnvironmentValue)";
 
             // The body writes the declared output unconditionally and, optionally, an undeclared file
             // in the same intermediate dir (which strict mode should observe via the obj/ snapshot).
@@ -236,11 +314,13 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
     <IntermediateOutputPath>obj\</IntermediateOutputPath>
     {modeProp}
     {exemptProp}
+    {cacheKeyEnvVarsProp}
+    {consumedEnvProp}
   </PropertyGroup>
   <Target Name=""DoWork"" Inputs=""{inputPath}"" Outputs=""{outputPath}"">
     <MakeDir Directories=""obj"" />
     <Message Importance=""High"" Text=""INSIDE_TARGET_BODY"" />
-    <WriteLinesToFile File=""{outputPath}"" Lines=""produced"" Overwrite=""true"" />
+    <WriteLinesToFile File=""{outputPath}"" Lines=""{outputLines}"" Overwrite=""true"" />
     {extraWrite}
   </Target>
 </Project>";

@@ -27,13 +27,15 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
     /// </summary>
     public sealed class StrictProjectCache_Tests : IDisposable
     {
+        private readonly ITestOutputHelper _output;
         private readonly TestEnvironment _env;
         private readonly string _projectDir;
         private readonly string _projectPath;
 
         public StrictProjectCache_Tests(ITestOutputHelper output)
         {
-            _env = TestEnvironment.Create(output);
+            _output = output;
+            _env = TestEnvironment.Create(_output);
             // Default to ENABLED for these tests; individual tests may override.
             _env.SetEnvironmentVariable("MSBUILDSTRICTMODE", "1");
             _env.SetEnvironmentVariable("MSBUILDSTRICTNOPROJECTCACHE", null);
@@ -324,6 +326,57 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             // Different requested targets => different cache key => miss.
             StrictProjectCache.TryHit(_projectPath, globals, new[] { "GetTargetPath" }, BuildRequestDataFlags.None, out _, out string r2).ShouldBeNull();
             r2.ShouldBe("no-manifest");
+        }
+
+        [Fact]
+        public void AllowListedEnvironmentVariableChange_InvalidatesCache()
+        {
+            const string envVarName = "MSBUILD_CACHEKEY_TEST_ALLOW";
+            _env.SetEnvironmentVariable(envVarName, "one");
+
+            var globals = new Dictionary<string, string>();
+            var targets = new[] { "Build" };
+            SeedHit(globals, targets);
+
+            StrictProjectCache.TryHit(_projectPath, globals, targets, BuildRequestDataFlags.None, out _, out string r1).ShouldNotBeNull();
+            r1.ShouldBe("hit");
+
+            _env.SetEnvironmentVariable(envVarName, "two");
+
+            StrictProjectCache.TryHit(_projectPath, globals, targets, BuildRequestDataFlags.None, out _, out string r2).ShouldBeNull();
+            r2.ShouldBe("no-manifest");
+        }
+
+        [Fact]
+        public void NonListedEnvironmentVariableChange_DoesNotInvalidateCache()
+        {
+            const string envVarName = "STRICTCACHEKEY_TEST_IGNORE";
+            _env.SetEnvironmentVariable(envVarName, "one");
+
+            var globals = new Dictionary<string, string>();
+            var targets = new[] { "Build" };
+            SeedHit(globals, targets);
+
+            _env.SetEnvironmentVariable(envVarName, "two");
+
+            StrictProjectCache.TryHit(_projectPath, globals, targets, BuildRequestDataFlags.None, out _, out string reason).ShouldNotBeNull();
+            reason.ShouldBe("hit");
+        }
+
+        [Fact]
+        public void VolatileAllowListedEnvironmentVariableChange_DoesNotInvalidateCache()
+        {
+            const string envVarName = "DOTNET_CLI_TELEMETRY_SESSIONID";
+            _env.SetEnvironmentVariable(envVarName, "one");
+
+            var globals = new Dictionary<string, string>();
+            var targets = new[] { "Build" };
+            SeedHit(globals, targets);
+
+            _env.SetEnvironmentVariable(envVarName, "two");
+
+            StrictProjectCache.TryHit(_projectPath, globals, targets, BuildRequestDataFlags.None, out _, out string reason).ShouldNotBeNull();
+            reason.ShouldBe("hit");
         }
 
         [Fact]

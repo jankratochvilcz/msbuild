@@ -481,6 +481,7 @@ namespace Microsoft.Build.BackEnd
             var sb = new StringBuilder();
             sb.Append("project=").Append(_project.FullPath ?? "").Append('\n');
             sb.Append("target=").Append(_targetName).Append('\n');
+            StrictCacheKeyEnvironment.AppendFingerprint(sb, _project.GetPropertyValue(StrictCacheKeyEnvironment.PropertyName));
 
             var sortedInputs = new List<string>(resolvedInputs);
             sortedInputs.Sort(StringComparer.Ordinal);

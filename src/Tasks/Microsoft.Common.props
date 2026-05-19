@@ -101,6 +101,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
   <PropertyGroup>
     <Configuration Condition=" '$(Configuration)' == '' and '$(DefaultProjectConfiguration)' != '' ">$(DefaultProjectConfiguration)</Configuration>
     <Platform Condition=" '$(Platform)' == '' and '$(DefaultProjectPlatform)' != '' ">$(DefaultProjectPlatform)</Platform>
+    <StrictModeCacheKeyEnvVars Condition="'$(StrictModeCacheKeyEnvVars)' == ''">BUILD_*;DOTNET_*;MSBUILD_*;NUGET_*;RID;LANG;LC_ALL;LC_MESSAGES;LANGUAGE</StrictModeCacheKeyEnvVars>
   </PropertyGroup>
 
   <PropertyGroup>
