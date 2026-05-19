@@ -283,6 +283,17 @@ namespace Microsoft.Build.Execution
                     return null;
                 }
 
+                // Portability guard: if the manifest was produced on a different machine (or
+                // copied via OneDrive/tarball into a different working tree on the same box),
+                // its absolute OutputFiles paths are meaningless here. Reject rather than risk
+                // restoring nothing — or, worse, restoring stale outputs from a sibling path.
+                if (StrictModeSettings.IsForeignManifest(m.ProjectFullPath, projectFullPath))
+                {
+                    reason = "foreign-machine";
+                    EmitTelemetry("miss", projectFullPath, targets, reason, sw, sigInputs.Count, cacheKey);
+                    return null;
+                }
+
                 // Verify cached output files still exist with the same size+mtime.
                 foreach (var of in m.OutputFiles)
                 {

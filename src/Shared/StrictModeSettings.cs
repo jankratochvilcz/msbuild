@@ -190,5 +190,38 @@ namespace Microsoft.Build.Strict
             // Unknown values are treated as Off to avoid silently enabling strict mode.
             return StrictModeLevel.Off;
         }
+
+        /// <summary>
+        /// Returns <c>true</c> when a strict-mode manifest's recorded project path looks like
+        /// it came from a different working tree (different machine, OneDrive-synced cache
+        /// dir, restored tarball, etc.). Such manifests embed absolute paths that are
+        /// meaningless in the current tree and must be rejected to avoid restoring stale
+        /// outputs or pointing the build at someone else's locations.
+        /// </summary>
+        /// <param name="recordedProjectPath">The project full path embedded in the manifest at record time. May be null/empty for pre-portability-check manifests, in which case the guard is skipped.</param>
+        /// <param name="currentProjectPath">The project full path being looked up right now.</param>
+        internal static bool IsForeignManifest(string recordedProjectPath, string currentProjectPath)
+        {
+            if (string.IsNullOrEmpty(recordedProjectPath) || string.IsNullOrEmpty(currentProjectPath))
+            {
+                return false;
+            }
+
+            string recorded;
+            string current;
+            try
+            {
+                recorded = System.IO.Path.GetFullPath(recordedProjectPath);
+                current = System.IO.Path.GetFullPath(currentProjectPath);
+            }
+            catch
+            {
+                // If either path cannot be normalised the safe answer is "not foreign"
+                // — the downstream existence/timestamp checks will catch any real staleness.
+                return false;
+            }
+
+            return !string.Equals(recorded, current, StringComparison.OrdinalIgnoreCase);
+        }
     }
 }

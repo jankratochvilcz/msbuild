@@ -56,7 +56,26 @@ consolidation introduced the following intentional behaviour changes:
 Both changes are gated behind the strict-mode opt-in itself, so they cannot affect a build with
 `MSBUILDSTRICTMODE` unset.
 
-## Source-file input set
+## Portability: rejecting foreign-machine manifests
+
+Strict-mode cache directories (`obj\.strict-project\` and `obj\.strict-fastskip\`) hold binary
+manifests that embed **absolute** paths for the recorded project file, its inputs, and its
+outputs. If those directories get copied across machines — via a shared OneDrive folder, a
+restored tarball, or a dev box cloned for a colleague — replaying them verbatim on the new
+machine would either silently miss (best case) or, worse, read the previous machine's bin/obj
+locations.
+
+Both the project-level and solution-fast-skip layers therefore compare the manifest's recorded
+project full path against the current project full path on every `TryHit` / `TryFastSkip`, via
+`StrictModeSettings.IsForeignManifest`. Mismatches short-circuit with the telemetry reason
+`foreign-machine` so the rate of foreign-manifest replay attempts is observable. Comparison is
+ordinal-ignore-case after `Path.GetFullPath` normalisation (matches the cache-key normaliser).
+
+Operationally, the cache directories `obj\.strict-project\`, `obj\.strict-fastskip\` and
+`obj\.strict-cache\` should be in `.gitignore` and should not be synced across machines via
+OneDrive / Dropbox / similar.
+
+
 
 Both the project-level cache (`StrictProjectCache`) and the solution-level fast-skip cache
 (`StrictSolutionFastSkip`) hash a fixed list of file extensions when computing their input

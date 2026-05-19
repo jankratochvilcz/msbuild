@@ -142,6 +142,16 @@ namespace Microsoft.Build.Strict
                     return false;
                 }
 
+                // Portability guard: a manifest that records a different absolute project path
+                // (e.g. tarballed from another machine, restored via OneDrive into a different
+                // working tree) cannot be trusted — its Inputs/Outputs absolute paths point at
+                // someone else's machine. Reject rather than risk a stale fast-skip.
+                if (StrictModeSettings.IsForeignManifest(m.ProjectFile, projectFile))
+                {
+                    reason = "foreign-machine";
+                    return false;
+                }
+
                 // 1. Fast directory-mtime check: if no input directory has changed mtime, the set
                 //    of files in those directories cannot have changed (added/removed/renamed).
                 //    NTFS, ext4 and APFS all update the directory mtime on entry changes.

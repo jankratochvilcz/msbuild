@@ -249,5 +249,55 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             _env.SetEnvironmentVariable(StrictModeSettings.EnvExtraInputExtensions, null);
             StrictModeSettings.GetExtraInputExtensions().Count.ShouldBe(0);
         }
+
+        // ---------------------------------------------------------------------
+        // IsForeignManifest: portability guard
+        // ---------------------------------------------------------------------
+
+        [Fact]
+        public void IsForeignManifest_NullOrEmpty_ReturnsFalse()
+        {
+            // Pre-portability-check manifests have empty recorded path; treat as not-foreign
+            // (downstream existence checks catch real staleness).
+            StrictModeSettings.IsForeignManifest(null, @"C:\src\P.csproj").ShouldBeFalse();
+            StrictModeSettings.IsForeignManifest("", @"C:\src\P.csproj").ShouldBeFalse();
+            StrictModeSettings.IsForeignManifest(@"C:\src\P.csproj", null).ShouldBeFalse();
+        }
+
+        [Fact]
+        public void IsForeignManifest_SamePath_ReturnsFalse()
+        {
+            string p = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "x", "P.csproj");
+            StrictModeSettings.IsForeignManifest(p, p).ShouldBeFalse();
+        }
+
+        [Fact]
+        public void IsForeignManifest_DifferentPath_ReturnsTrue()
+        {
+            string a = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "alice", "P.csproj");
+            string b = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "bob", "P.csproj");
+            StrictModeSettings.IsForeignManifest(a, b).ShouldBeTrue();
+        }
+
+        [Fact]
+        public void IsForeignManifest_CaseDifferenceOnly_ReturnsFalse()
+        {
+            // Windows paths are case-insensitive; same path with different casing is the same
+            // working tree, not a foreign one. (Match the OrdinalIgnoreCase comparer the
+            // strict-mode cache key normalizer already uses.)
+            string p = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "Mixed", "P.csproj");
+            StrictModeSettings.IsForeignManifest(p, p.ToUpperInvariant()).ShouldBeFalse();
+        }
+
+        [Fact]
+        public void IsForeignManifest_RelativeVsAbsolute_NormalisesBeforeCompare()
+        {
+            // GetFullPath turns a relative path into an absolute one using cwd, which should
+            // still be considered "current" if it resolves to the same file as the recorded
+            // absolute. (Defensive: avoid a foreign-flag for the same on-disk project just
+            // because one side was written relative.)
+            string absPath = System.IO.Path.GetFullPath("P.csproj");
+            StrictModeSettings.IsForeignManifest(absPath, "P.csproj").ShouldBeFalse();
+        }
     }
 }
