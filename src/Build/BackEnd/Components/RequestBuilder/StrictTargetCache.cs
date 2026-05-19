@@ -763,9 +763,10 @@ namespace Microsoft.Build.BackEnd
         }
 
         /// <summary>
-        /// Store path: copy from build output into the cache. Skips the copy if the destination
-        /// already exists with matching size (this is a poor-man's content-address: keyed entries
-        /// re-use blobs that another miss already wrote).
+        /// Store path: copy from build output into this cache entry. Skips the copy if the
+        /// destination already exists with matching size; that fast path is safe because
+        /// <paramref name="dest"/> always lives under the current per-key cache entry, so
+        /// different cache keys never share <c>out\decl</c> or <c>out\obs</c> destinations.
         /// Always uses File.Copy (not a hardlink) because a hardlink would let the next in-place
         /// write from the build silently corrupt the cached blob.
         /// </summary>

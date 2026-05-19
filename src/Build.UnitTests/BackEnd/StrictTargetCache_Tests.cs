@@ -269,6 +269,43 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
         }
 
         [Fact]
+        public void E2E_DifferentCacheKeys_KeepIndependentObservedOutputs()
+        {
+            const string envVarName = "STRICT_TARGET_CACHE_OBS";
+            _env.SetEnvironmentVariable(envVarName, "one");
+
+            var (projectPath, _, outputPath) = WriteDemoProject(
+                strictMode: "warn",
+                writeUndeclared: true,
+                cacheKeyEnvVars: envVarName,
+                consumedEnvironmentVariable: envVarName);
+            string undeclaredPath = Path.Combine(Path.GetDirectoryName(projectPath), "obj", "undeclared.out");
+
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+            File.ReadAllText(undeclaredPath).Trim().ShouldBe("one");
+
+            _env.SetEnvironmentVariable(envVarName, "two");
+            File.Delete(outputPath);
+            File.Delete(undeclaredPath);
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+            File.ReadAllText(undeclaredPath).Trim().ShouldBe("two");
+
+            _env.SetEnvironmentVariable(envVarName, "one");
+            File.Delete(outputPath);
+            File.Delete(undeclaredPath);
+            MockLogger logger1 = BuildOnce(projectPath);
+            logger1.AssertLogDoesntContain("INSIDE_TARGET_BODY");
+            File.ReadAllText(undeclaredPath).Trim().ShouldBe("one");
+
+            _env.SetEnvironmentVariable(envVarName, "two");
+            File.Delete(outputPath);
+            File.Delete(undeclaredPath);
+            MockLogger logger2 = BuildOnce(projectPath);
+            logger2.AssertLogDoesntContain("INSIDE_TARGET_BODY");
+            File.ReadAllText(undeclaredPath).Trim().ShouldBe("two");
+        }
+
+        [Fact]
         public void E2E_NonListedEnvironmentVariableChange_DoesNotInvalidateCache()
         {
             const string envVarName = "STRICT_TARGET_CACHE_ENV_IGNORE";
@@ -353,7 +390,7 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             // The body writes the declared output unconditionally and, optionally, an undeclared file
             // in the same intermediate dir (which strict mode should observe via the obj/ snapshot).
             string extraWrite = writeUndeclared
-                ? $@"<WriteLinesToFile File=""{undeclaredPath}"" Lines=""sneaky"" Overwrite=""true"" />"
+                ? $@"<WriteLinesToFile File=""{undeclaredPath}"" Lines=""{outputLines}"" Overwrite=""true"" />"
                 : string.Empty;
 
             string content = $@"<Project DefaultTargets=""DoWork"">
