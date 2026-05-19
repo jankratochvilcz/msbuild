@@ -33,11 +33,35 @@ namespace Microsoft.Build.Strict
         private const string EnvFile = "MSBUILDSTRICTTELEMETRYFILE";
         private const string EnvIter = "MSBUILDSTRICTTELEMETRYITER";
 
-        private static readonly string s_file = Environment.GetEnvironmentVariable(EnvFile);
-        private static readonly string s_iter = Environment.GetEnvironmentVariable(EnvIter);
-        private static readonly bool s_enabled = !string.IsNullOrEmpty(s_file);
+        // Re-read both env vars on every Emit call so that MSBuild Server / persistent
+        // worker nodes (which outlive a single `dotnet build` invocation) pick up
+        // changes between invocations. The sibling StrictTargetCache.GetMode follows
+        // the same per-call re-read pattern for exactly this reason; see that method
+        // before reverting this to a static-readonly initializer.
+        private static volatile string s_file = Environment.GetEnvironmentVariable(EnvFile);
+        private static volatile string s_iter = Environment.GetEnvironmentVariable(EnvIter);
 
-        public static bool IsEnabled => s_enabled;
+        public static bool IsEnabled => !string.IsNullOrEmpty(ResolveFile());
+
+        private static string ResolveFile()
+        {
+            string current = Environment.GetEnvironmentVariable(EnvFile);
+            if (!ReferenceEquals(current, s_file) && !string.Equals(current, s_file, StringComparison.Ordinal))
+            {
+                s_file = current;
+            }
+            return s_file;
+        }
+
+        private static string ResolveIter()
+        {
+            string current = Environment.GetEnvironmentVariable(EnvIter);
+            if (!ReferenceEquals(current, s_iter) && !string.Equals(current, s_iter, StringComparison.Ordinal))
+            {
+                s_iter = current;
+            }
+            return s_iter;
+        }
 
         public static void Emit(
             string layer,
@@ -51,10 +75,12 @@ namespace Microsoft.Build.Strict
             int? fileCount = null,
             string cacheKey = null)
         {
-            if (!s_enabled)
+            string file = ResolveFile();
+            if (string.IsNullOrEmpty(file))
             {
                 return;
             }
+            string iter = ResolveIter();
 
             try
             {
@@ -65,9 +91,9 @@ namespace Microsoft.Build.Strict
                 AppendStr(sb, "layer", layer);
                 AppendComma(sb);
                 AppendStr(sb, "outcome", outcome);
-                if (!string.IsNullOrEmpty(s_iter))
+                if (!string.IsNullOrEmpty(iter))
                 {
-                    AppendComma(sb); sb.Append("\"iteration\":").Append(s_iter);
+                    AppendComma(sb); sb.Append("\"iteration\":").Append(iter);
                 }
                 if (project != null) { AppendComma(sb); AppendStr(sb, "project", project); }
                 if (target != null) { AppendComma(sb); AppendStr(sb, "target", target); }
@@ -86,7 +112,7 @@ namespace Microsoft.Build.Strict
                 // sub-PIPE_BUF lines we emit (<4 KB).
                 byte[] bytes = Encoding.UTF8.GetBytes(sb.ToString());
                 using var fs = new FileStream(
-                    s_file,
+                    file,
                     FileMode.Append,
                     FileAccess.Write,
                     FileShare.ReadWrite,
