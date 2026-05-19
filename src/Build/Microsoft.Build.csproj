@@ -131,6 +131,7 @@
     <Compile Include="..\Shared\TaskEngineAssemblyResolver.cs" />
     <Compile Include="AssemblyInfo.cs" />
     <Compile Include="BackEnd\BuildManager\BuildManager.cs" />
+    <Compile Include="BackEnd\BuildManager\StrictProjectCache.cs" />
     <Compile Include="BackEnd\BuildManager\BuildParameters.cs" />
     <Compile Include="BackEnd\BuildManager\BuildRequestDataBase.cs" />
     <Compile Include="BackEnd\BuildManager\BuildSubmissionBase.cs" />
@@ -345,6 +346,7 @@
     <Compile Include="BackEnd\Components\RequestBuilder\RequestBuilder.cs" />
     <Compile Include="BackEnd\Components\RequestBuilder\TargetBuilder.cs" />
     <Compile Include="BackEnd\Components\RequestBuilder\TargetEntry.cs" />
+    <Compile Include="BackEnd\Components\RequestBuilder\StrictTargetCache.cs" />
     <Compile Include="BackEnd\Components\RequestBuilder\TargetUpToDateChecker.cs" />
     <Compile Include="BackEnd\Components\RequestBuilder\TaskBuilder.cs" />
     <Compile Include="BackEnd\Components\RequestBuilder\TaskHost.cs" />
@@ -608,6 +610,9 @@
     </Compile>
     <Compile Include="..\Shared\ErrorUtilities.cs">
       <Link>Errors\ErrorUtilities.cs</Link>
+    </Compile>
+    <Compile Include="..\Shared\StrictTelemetry.cs">
+      <Link>SharedUtilities\StrictTelemetry.cs</Link>
     </Compile>
     <Compile Include="..\Shared\InprocTrackingNativeMethods.cs">
       <Link>InprocTrackingNativeMethods.cs</Link>

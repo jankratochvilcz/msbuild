@@ -794,8 +794,18 @@ namespace Microsoft.Build.BackEnd
         public List<(string name, TargetBuiltReason reason)> GetTargetsUsedToBuildRequest(BuildRequest request)
         {
             ErrorUtilities.VerifyThrow(request.ConfigurationId == ConfigurationId, "Request does not match configuration.");
-            ErrorUtilities.VerifyThrow(_projectInitialTargets != null, "Initial targets have not been set.");
-            ErrorUtilities.VerifyThrow(_projectDefaultTargets != null, "Default targets have not been set.");
+
+            // Tier-3 strict-mode project fast-skip can satisfy a child request without ever
+            // loading the project (see Scheduler.TryStrictProjectCacheFastSkipChild). In that
+            // case the initial/default target lists are not populated. Callers (notably
+            // NodeLoggingContext.LogRequestHandledFromCache) only use the returned list to
+            // produce a synthetic ProjectStarted event, so degrading to an empty list when
+            // we have nothing to report is correct and avoids an InternalErrorException that
+            // would crash the build with exit code -2146232797.
+            if (_projectInitialTargets == null || _projectDefaultTargets == null)
+            {
+                return new List<(string name, TargetBuiltReason reason)>(request.Targets.Count);
+            }
 
             if (request.ProxyTargets != null)
             {

@@ -1583,8 +1583,16 @@ namespace Microsoft.Build.Execution
                         }
                         else
                         {
-                            AddBuildRequestToSubmission(submission, resolvedConfiguration.ConfigurationId);
-                            IssueBuildRequestForBuildSubmission(submission, resolvedConfiguration, allowMainThreadBuild);
+                            // Tier-3 "Strict Mode" per-project fast-skip: try to satisfy this submission
+                            // entirely from a persisted manifest before we hand it to the scheduler. On a
+                            // hit we synthesise a BuildResult and complete the submission via the exact
+                            // same code path used by the project-cache plugin hit case below. On a miss we
+                            // register for post-build persistence and fall through to the normal build.
+                            if (!TryStrictProjectCacheFastSkip(submission, resolvedConfiguration))
+                            {
+                                AddBuildRequestToSubmission(submission, resolvedConfiguration.ConfigurationId);
+                                IssueBuildRequestForBuildSubmission(submission, resolvedConfiguration, allowMainThreadBuild);
+                            }
                         }
                     }
                 }
@@ -2046,6 +2054,81 @@ namespace Microsoft.Build.Execution
                 submission.BuildRequestData.Flags,
                 submission.BuildRequestData.RequestedProjectState,
                 projectContextId);
+        }
+
+        /// <summary>
+        /// Tier-3 "Strict Mode" project fast-skip. Returns true iff the submission was
+        /// satisfied from cache (i.e. caller should NOT issue a normal build request).
+        /// On a miss, records pending state so the result will be persisted on completion.
+        /// </summary>
+        private bool TryStrictProjectCacheFastSkip(BuildSubmission submission, BuildRequestConfiguration resolvedConfiguration)
+        {
+            try
+            {
+                if (!StrictProjectCache.IsEnabled())
+                {
+                    return false;
+                }
+
+                BuildRequestData data = submission.BuildRequestData;
+                string? projectFullPath = data?.ProjectFullPath;
+                if (data is null || string.IsNullOrEmpty(projectFullPath))
+                {
+                    return false;
+                }
+
+                ICollection<string> rawTargets = data.TargetNames;
+                IReadOnlyList<string> targetNames = rawTargets switch
+                {
+                    IReadOnlyList<string> rol => rol,
+                    null => [],
+                    _ => rawTargets.ToArray(),
+                };
+                Dictionary<string, string>? globalProps = null;
+                if (data.GlobalProperties is not null)
+                {
+                    globalProps = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var p in data.GlobalProperties)
+                    {
+                        if (p is not null && !string.IsNullOrEmpty(p.Name))
+                        {
+                            globalProps[p.Name] = p.EvaluatedValue ?? string.Empty;
+                        }
+                    }
+                }
+
+                StrictProjectCache.CachedBuild cached = StrictProjectCache.TryHit(
+                    projectFullPath,
+                    globalProps,
+                    targetNames,
+                    data.Flags,
+                    out string cacheKey,
+                    out string _);
+
+                if (cached is null)
+                {
+                    if (!string.IsNullOrEmpty(cacheKey))
+                    {
+                        StrictProjectCache.RegisterMiss(submission.SubmissionId, projectFullPath, globalProps, targetNames, cacheKey);
+                    }
+                    return false;
+                }
+
+                // Hit: mirror the project-cache plugin hit path (see HandleCacheResult).
+                AddBuildRequestToSubmission(submission, resolvedConfiguration.ConfigurationId);
+                var synthesised = new BuildResult(submission.BuildRequest!);
+                cached.PopulateBuildResult(synthesised, targetNames);
+                _resultsCache!.AddResult(synthesised);
+                submission.CompleteLogging();
+                ReportResultsToSubmission<BuildRequestData, BuildResult>(synthesised);
+                return true;
+            }
+            catch
+            {
+                // Strict-mode fast-skip is a pure optimisation. Any failure here MUST fall
+                // through to the normal build path with no observable effect.
+                return false;
+            }
         }
 
         /// <summary>
@@ -2977,6 +3060,22 @@ namespace Microsoft.Build.Execution
                     }
 
                     submission.CompleteResults(result);
+
+                    // Tier-3 "Strict Mode" project fast-skip: if this submission was registered as
+                    // a miss earlier, persist the BuildResult's per-target outputs to disk so the
+                    // next invocation can short-circuit. Safety-checked inside MaybeStoreOnCompletion.
+                    if (submission is BuildSubmission buildSub && result is BuildResult buildRes)
+                    {
+                        try
+                        {
+                            StrictProjectCache.MaybeStoreOnCompletion(buildSub.SubmissionId, buildRes);
+                        }
+                        catch
+                        {
+                            // Optimisation only – never fail the build.
+                        }
+                    }
+
                     CheckSubmissionCompletenessAndRemove(submission);
                 }
             }

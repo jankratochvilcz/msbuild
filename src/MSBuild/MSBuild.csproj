@@ -60,6 +60,7 @@
     </Compile>
     <Compile Include="..\Shared\ResourceUtilities.cs" />
     <Compile Include="..\Shared\ErrorUtilities.cs" />
+    <Compile Include="..\Shared\StrictTelemetry.cs" />
     <Compile Include="..\Shared\NamedPipeUtil.cs" />
     <Compile Include="..\GlobalUsings.cs" Link="GlobalUsings.cs" />
     <Compile Include="..\Shared\INodeEndpoint.cs" />
@@ -107,6 +108,7 @@
     <Compile Include="PerformanceLogEventListener.cs" />
     <Compile Include="JsonOutputFormatter.cs" />
     <Compile Include="XMake.cs" />
+    <Compile Include="StrictSolutionFastSkip.cs" />
     <!-- This is to enable CodeMarkers in MSBuild.exe -->
     <!-- Win32 RC Files -->
     <RCResourceFile Include="native.rc" />
