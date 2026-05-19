@@ -398,6 +398,45 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
         }
 
         [Fact]
+        public void OuterBuildMissesWhenTrackedInnerManifestIsStale()
+        {
+            var outerGlobals = new Dictionary<string, string>(MSBuildNameIgnoreCaseComparer.Default)
+            {
+                ["Configuration"] = "Debug",
+            };
+            var innerGlobals = new Dictionary<string, string>(MSBuildNameIgnoreCaseComparer.Default)
+            {
+                ["Configuration"] = "Debug",
+                ["TargetFramework"] = "net10.0",
+            };
+            var targets = new[] { "Build" };
+
+            string innerAssemblyPath = CreateOutputFile("bin", "Debug", "net10.0", "P.dll");
+            string innerDepsPath = CreateOutputFile("obj", "Debug", "net10.0", "P.deps.json");
+
+            StrictProjectCache.TryHit(_projectPath, innerGlobals, targets, BuildRequestDataFlags.None, out string innerCacheKey, out _).ShouldBeNull();
+            StrictProjectCache.RegisterMiss(201, _projectPath, innerGlobals, targets, innerCacheKey);
+            StrictProjectCache.MaybeStoreOnCompletion(201, MakeSuccessResult(("Build", [
+                (innerAssemblyPath, Array.Empty<(string, string)>()),
+                (innerDepsPath, Array.Empty<(string, string)>()),
+            ])));
+
+            StrictProjectCache.TryHit(_projectPath, outerGlobals, targets, BuildRequestDataFlags.None, out string outerCacheKey, out _).ShouldBeNull();
+            StrictProjectCache.RegisterMiss(202, _projectPath, outerGlobals, targets, outerCacheKey);
+            StrictProjectCache.MaybeStoreOnCompletion(202, MakeSuccessResult(("Build", [
+                (innerAssemblyPath, Array.Empty<(string, string)>()),
+            ])));
+
+            StrictProjectCache.TryHit(_projectPath, outerGlobals, targets, BuildRequestDataFlags.None, out _, out string hitReason).ShouldNotBeNull();
+            hitReason.ShouldBe("hit");
+
+            File.Delete(innerDepsPath);
+
+            StrictProjectCache.TryHit(_projectPath, outerGlobals, targets, BuildRequestDataFlags.None, out _, out string missReason).ShouldBeNull();
+            missReason.ShouldStartWith("output-missing-or-changed:");
+        }
+
+        [Fact]
         public void NonListedEnvironmentVariableChange_DoesNotInvalidateCache()
         {
             const string envVarName = "STRICTCACHEKEY_TEST_IGNORE";
@@ -473,6 +512,14 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             }
             BuildResult result = MakeSuccessResult(perTarget);
             StrictProjectCache.MaybeStoreOnCompletion(subId, result);
+        }
+
+        private string CreateOutputFile(params string[] relativeSegments)
+        {
+            string path = Path.Combine(_projectDir, Path.Combine(relativeSegments));
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            File.WriteAllText(path, string.Join("/", relativeSegments));
+            return path;
         }
 
         private static BuildResult MakeSuccessResult(params (string TargetName, (string ItemSpec, (string Key, string Value)[] Metadata)[] Items)[] targets)

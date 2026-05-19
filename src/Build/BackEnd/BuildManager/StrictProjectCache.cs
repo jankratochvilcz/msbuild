@@ -59,7 +59,7 @@ namespace Microsoft.Build.Execution
     internal static class StrictProjectCache
     {
         private const string CacheDirName = ".strict-project";
-        private const int ManifestSchemaVersion = 1;
+        private const int ManifestSchemaVersion = 2;
         private static readonly TimeSpan s_orphanTempSweepAge = TimeSpan.FromHours(1);
 
         // Targets we are willing to synthesise from cache. These are pure "describe what the
@@ -323,92 +323,11 @@ namespace Microsoft.Build.Execution
                     return null;
                 }
 
-                // Verify cached output files still exist with the same size+mtime.
-                foreach (var of in m.OutputFiles)
+                if (!TryValidateManifestTargetCoverage(m, targets, out reason)
+                    || !TryValidateManifestOutputsAndDependencies(m, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { cacheKey }, out reason))
                 {
-                    try
-                    {
-                        var fi = new FileInfo(of.Path);
-                        if (!fi.Exists || fi.Length != of.Size || fi.LastWriteTimeUtc.Ticks != of.Ticks)
-                        {
-                            reason = "output-missing-or-changed:" + of.Path;
-                            EmitTelemetry("miss", projectFullPath, targets, reason, sw, sigInputs.Count, cacheKey);
-                            return null;
-                        }
-                    }
-                    catch
-                    {
-                        reason = "output-stat-failed:" + of.Path;
-                        EmitTelemetry("miss", projectFullPath, targets, reason, sw, sigInputs.Count, cacheKey);
-                        return null;
-                    }
-                }
-
-                // Additional belt-and-braces: walk every cached TaskItem ItemSpec. If the spec
-                // looks like a file path AND has an output-ish extension (.dll/.exe/.pdb/…),
-                // require the file to exist on disk. This protects against the failure mode
-                // where a consuming project's ResolveAssemblyReference/Copy reads back a path
-                // we hand it from cache only to find the bits were cleaned out from under us.
-                // The OutputFileStamp check above is comprehensive for items present at persist
-                // time, but this scan is the last line of defence for stale or partial caches.
-                string projDirForRelative = Path.GetDirectoryName(projectFullPath);
-                foreach (CachedTargetResult ctr in m.TargetResults)
-                {
-                    if (ctr.Items is null)
-                    {
-                        continue;
-                    }
-                    for (int i = 0; i < ctr.Items.Count; i++)
-                    {
-                        string spec = ctr.Items[i].ItemSpec;
-                        if (!LooksLikeFilePath(spec))
-                        {
-                            continue;
-                        }
-                        string ext = Path.GetExtension(spec);
-                        if (!s_outputExts.Contains(ext))
-                        {
-                            continue;
-                        }
-                        string abs = ResolveRelative(spec, projDirForRelative);
-                        if (string.IsNullOrEmpty(abs))
-                        {
-                            continue;
-                        }
-                        if (!File.Exists(abs))
-                        {
-                            reason = "synth-output-missing:" + abs;
-                            EmitTelemetry("miss", projectFullPath, targets, reason, sw, sigInputs.Count, cacheKey);
-                            return null;
-                        }
-                    }
-                }
-
-                // Verify the manifest contains every requested target. Missing => miss.
-                if (targets is not null && targets.Count > 0)
-                {
-                    foreach (string t in targets)
-                    {
-                        if (string.IsNullOrEmpty(t))
-                        {
-                            continue;
-                        }
-                        bool found = false;
-                        for (int i = 0; i < m.TargetResults.Count; i++)
-                        {
-                            if (string.Equals(m.TargetResults[i].TargetName, t, StringComparison.OrdinalIgnoreCase))
-                            {
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (!found)
-                        {
-                            reason = "missing-target-result:" + t;
-                            EmitTelemetry("miss", projectFullPath, targets, reason, sw, sigInputs.Count, cacheKey);
-                            return null;
-                        }
-                    }
+                    EmitTelemetry("miss", projectFullPath, targets, reason, sw, sigInputs.Count, cacheKey);
+                    return null;
                 }
 
                 reason = "hit";
@@ -634,6 +553,8 @@ namespace Microsoft.Build.Execution
                     }
                 }
 
+                manifest.DependentManifestCacheKeys = CollectDependentManifestCacheKeys(projectFullPath, globalProperties, requestedTargets, cacheKey);
+
                 string manifestPath = GetManifestPath(projectFullPath, cacheKey);
                 Save(manifestPath, manifest);
                 sw.Stop();
@@ -650,6 +571,313 @@ namespace Microsoft.Build.Execution
                 {
                 }
             }
+        }
+
+        private static bool TryValidateManifestTargetCoverage(Manifest manifest, IReadOnlyList<string> targets, out string reason)
+        {
+            reason = null;
+            if (targets is null || targets.Count == 0)
+            {
+                return true;
+            }
+
+            foreach (string t in targets)
+            {
+                if (string.IsNullOrEmpty(t))
+                {
+                    continue;
+                }
+
+                bool found = false;
+                for (int i = 0; i < manifest.TargetResults.Count; i++)
+                {
+                    if (string.Equals(manifest.TargetResults[i].TargetName, t, StringComparison.OrdinalIgnoreCase))
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (!found)
+                {
+                    reason = "missing-target-result:" + t;
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool TryValidateManifestOutputsAndDependencies(Manifest manifest, HashSet<string> visitedCacheKeys, out string reason)
+        {
+            reason = null;
+
+            foreach (var of in manifest.OutputFiles)
+            {
+                try
+                {
+                    var fi = new FileInfo(of.Path);
+                    if (!fi.Exists || fi.Length != of.Size || fi.LastWriteTimeUtc.Ticks != of.Ticks)
+                    {
+                        reason = "output-missing-or-changed:" + of.Path;
+                        return false;
+                    }
+                }
+                catch
+                {
+                    reason = "output-stat-failed:" + of.Path;
+                    return false;
+                }
+            }
+
+            string projDirForRelative = Path.GetDirectoryName(manifest.ProjectFullPath);
+            foreach (CachedTargetResult ctr in manifest.TargetResults)
+            {
+                if (ctr.Items is null)
+                {
+                    continue;
+                }
+
+                for (int i = 0; i < ctr.Items.Count; i++)
+                {
+                    string spec = ctr.Items[i].ItemSpec;
+                    if (!LooksLikeFilePath(spec))
+                    {
+                        continue;
+                    }
+
+                    string ext = Path.GetExtension(spec);
+                    if (!s_outputExts.Contains(ext))
+                    {
+                        continue;
+                    }
+
+                    string abs = ResolveRelative(spec, projDirForRelative);
+                    if (string.IsNullOrEmpty(abs))
+                    {
+                        continue;
+                    }
+
+                    if (!File.Exists(abs))
+                    {
+                        reason = "synth-output-missing:" + abs;
+                        return false;
+                    }
+                }
+            }
+
+            if (manifest.DependentManifestCacheKeys is null)
+            {
+                return true;
+            }
+
+            for (int i = 0; i < manifest.DependentManifestCacheKeys.Count; i++)
+            {
+                if (!TryValidateDependentManifest(manifest.ProjectFullPath, manifest.DependentManifestCacheKeys[i], visitedCacheKeys, out reason))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool TryValidateDependentManifest(string projectFullPath, string dependentCacheKey, HashSet<string> visitedCacheKeys, out string reason)
+        {
+            reason = null;
+            if (string.IsNullOrEmpty(dependentCacheKey) || !visitedCacheKeys.Add(dependentCacheKey))
+            {
+                return true;
+            }
+
+            string manifestPath = GetManifestPath(projectFullPath, dependentCacheKey);
+            if (!File.Exists(manifestPath))
+            {
+                reason = "dependent-no-manifest:" + dependentCacheKey;
+                return false;
+            }
+
+            Manifest dependentManifest = Manifest.Load(manifestPath);
+            if (dependentManifest is null)
+            {
+                reason = "dependent-manifest-corrupt:" + dependentCacheKey;
+                return false;
+            }
+
+            if (dependentManifest.SchemaVersion != ManifestSchemaVersion || !string.Equals(dependentManifest.CacheKey, dependentCacheKey, StringComparison.Ordinal))
+            {
+                reason = "dependent-manifest-mismatch:" + dependentCacheKey;
+                return false;
+            }
+
+            if (StrictModeSettings.IsForeignManifest(dependentManifest.ProjectFullPath, projectFullPath))
+            {
+                reason = "dependent-foreign-machine:" + dependentManifest.ProjectFullPath;
+                return false;
+            }
+
+            string recomputedCacheKey = ComputeCacheKey(
+                dependentManifest.ProjectFullPath,
+                ToDictionary(dependentManifest.GlobalProperties),
+                dependentManifest.Targets,
+                EnumerateSignatureInputs(dependentManifest.ProjectFullPath));
+            if (!string.Equals(dependentManifest.CacheKey, recomputedCacheKey, StringComparison.Ordinal))
+            {
+                reason = "dependent-cachekey-mismatch:" + dependentManifest.ProjectFullPath;
+                return false;
+            }
+
+            return TryValidateManifestOutputsAndDependencies(dependentManifest, visitedCacheKeys, out reason);
+        }
+
+        private static List<string> CollectDependentManifestCacheKeys(
+            string projectFullPath,
+            List<KeyValuePair<string, string>> globalProperties,
+            List<string> requestedTargets,
+            string cacheKey)
+        {
+            if (HasNonEmptyGlobalProperty(globalProperties, "TargetFramework"))
+            {
+                return [];
+            }
+
+            string projectDirectory = Path.GetDirectoryName(projectFullPath);
+            if (string.IsNullOrEmpty(projectDirectory))
+            {
+                return [];
+            }
+
+            string manifestDirectory = Path.Combine(projectDirectory, "obj", CacheDirName);
+            if (!Directory.Exists(manifestDirectory))
+            {
+                return [];
+            }
+
+            var dependentCacheKeys = new List<string>();
+            foreach (string candidatePath in Directory.EnumerateFiles(manifestDirectory, "*.manifest"))
+            {
+                Manifest candidateManifest = Manifest.Load(candidatePath);
+                if (candidateManifest is null
+                    || string.Equals(candidateManifest.CacheKey, cacheKey, StringComparison.Ordinal)
+                    || !string.Equals(NormalizePath(candidateManifest.ProjectFullPath), NormalizePath(projectFullPath), StringComparison.Ordinal)
+                    || !IsInnerBuildManifestCandidate(candidateManifest, globalProperties, requestedTargets))
+                {
+                    continue;
+                }
+
+                dependentCacheKeys.Add(candidateManifest.CacheKey);
+            }
+
+            dependentCacheKeys.Sort(StringComparer.Ordinal);
+            return dependentCacheKeys;
+        }
+
+        private static bool IsInnerBuildManifestCandidate(
+            Manifest candidateManifest,
+            List<KeyValuePair<string, string>> outerGlobalProperties,
+            List<string> requestedTargets)
+        {
+            if (!TargetsAreEquivalent(candidateManifest.Targets, requestedTargets))
+            {
+                return false;
+            }
+
+            Dictionary<string, string> outerGlobals = ToDictionary(outerGlobalProperties);
+            Dictionary<string, string> candidateGlobals = ToDictionary(candidateManifest.GlobalProperties);
+            if (!candidateGlobals.TryGetValue("TargetFramework", out string targetFramework) || string.IsNullOrEmpty(targetFramework))
+            {
+                return false;
+            }
+
+            if (candidateGlobals.Count != outerGlobals.Count + 1)
+            {
+                return false;
+            }
+
+            foreach (var kv in outerGlobals)
+            {
+                if (!candidateGlobals.TryGetValue(kv.Key, out string candidateValue) || !string.Equals(candidateValue, kv.Value, StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool TargetsAreEquivalent(IReadOnlyList<string> left, IReadOnlyList<string> right)
+        {
+            List<string> normalizedLeft = NormalizeTargets(left);
+            List<string> normalizedRight = NormalizeTargets(right);
+            if (normalizedLeft.Count != normalizedRight.Count)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < normalizedLeft.Count; i++)
+            {
+                if (!string.Equals(normalizedLeft[i], normalizedRight[i], StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static List<string> NormalizeTargets(IReadOnlyList<string> targets)
+        {
+            if (targets is null || targets.Count == 0)
+            {
+                return [];
+            }
+
+            var normalized = new List<string>(targets.Count);
+            for (int i = 0; i < targets.Count; i++)
+            {
+                if (!string.IsNullOrEmpty(targets[i]))
+                {
+                    normalized.Add(CanonicalizeMSBuildIdentifierForCacheKey(targets[i]));
+                }
+            }
+
+            normalized.Sort(StringComparer.Ordinal);
+            return normalized;
+        }
+
+        private static Dictionary<string, string> ToDictionary(IReadOnlyList<KeyValuePair<string, string>> values)
+        {
+            var dictionary = new Dictionary<string, string>(values?.Count ?? 0, StringComparer.OrdinalIgnoreCase);
+            if (values is null)
+            {
+                return dictionary;
+            }
+
+            for (int i = 0; i < values.Count; i++)
+            {
+                dictionary[values[i].Key] = values[i].Value ?? string.Empty;
+            }
+
+            return dictionary;
+        }
+
+        private static bool HasNonEmptyGlobalProperty(IReadOnlyList<KeyValuePair<string, string>> globalProperties, string propertyName)
+        {
+            if (globalProperties is null)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < globalProperties.Count; i++)
+            {
+                KeyValuePair<string, string> pair = globalProperties[i];
+                if (string.Equals(pair.Key, propertyName, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(pair.Value))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private static void CopyMetadata(ITaskItem item, List<KeyValuePair<string, string>> dest)
@@ -1213,6 +1441,7 @@ namespace Microsoft.Build.Execution
             public List<KeyValuePair<string, string>> GlobalProperties;
             public List<CachedTargetResult> TargetResults;
             public List<OutputFileStamp> OutputFiles;
+            public List<string> DependentManifestCacheKeys;
 
             public static Manifest Load(string path)
             {
@@ -1230,6 +1459,7 @@ namespace Microsoft.Build.Execution
                         GlobalProperties = new List<KeyValuePair<string, string>>(),
                         TargetResults = new List<CachedTargetResult>(),
                         OutputFiles = new List<OutputFileStamp>(),
+                        DependentManifestCacheKeys = new List<string>(),
                     };
 
                     int n = br.ReadInt32();
@@ -1279,6 +1509,11 @@ namespace Microsoft.Build.Execution
                         long sz = br.ReadInt64();
                         long ticks = br.ReadInt64();
                         m.OutputFiles.Add(new OutputFileStamp(p, sz, ticks));
+                    }
+                    n = br.ReadInt32();
+                    for (int i = 0; i < n; i++)
+                    {
+                        m.DependentManifestCacheKeys.Add(br.ReadString());
                     }
                     return m;
                 }
@@ -1366,6 +1601,15 @@ namespace Microsoft.Build.Execution
                         bw.Write(of.Path ?? string.Empty);
                         bw.Write(of.Size);
                         bw.Write(of.Ticks);
+                    }
+                }
+
+                bw.Write(m.DependentManifestCacheKeys?.Count ?? 0);
+                if (m.DependentManifestCacheKeys is not null)
+                {
+                    for (int i = 0; i < m.DependentManifestCacheKeys.Count; i++)
+                    {
+                        bw.Write(m.DependentManifestCacheKeys[i] ?? string.Empty);
                     }
                 }
             }

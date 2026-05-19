@@ -293,8 +293,6 @@ specific check that fired (`no-manifest`, `manifest-corrupt`, `manifest-mismatch
 - **No first-class cache-miss diagnostics.** Reason strings are heterogeneous and there is no structured event
   (#15).
 - **No concurrency / restart / multi-node test coverage** beyond happy paths (#17).
-- **Outer multi-TF build can hit cache while inner outputs are stale.** Synthetic-output guard only checks
-  file existence, not freshness (#20).
 - **Hot-path overhead when feature is off** has not been measured (#18).
 - **Solution fast-skip is CLI-only.** Visual Studio and direct `BuildManager` API consumers do not get it (#19).
 
