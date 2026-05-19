@@ -184,6 +184,34 @@ namespace Microsoft.Build.Execution
             }
         }
 
+        private static int CompareMSBuildIdentifierForCacheKey(string left, string right)
+        {
+            return StringComparer.Ordinal.Compare(
+                CanonicalizeMSBuildIdentifierForCacheKey(left),
+                CanonicalizeMSBuildIdentifierForCacheKey(right));
+        }
+
+        private static string CanonicalizeMSBuildIdentifierForCacheKey(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return value ?? string.Empty;
+            }
+
+            char[] chars = null;
+            for (int i = 0; i < value.Length; i++)
+            {
+                char c = value[i];
+                if (c is >= 'a' and <= 'z')
+                {
+                    chars ??= value.ToCharArray();
+                    chars[i] = (char)(c - ('a' - 'A'));
+                }
+            }
+
+            return chars is null ? value : new string(chars);
+        }
+
         public static bool IsEnabled()
         {
             return StrictModeSettings.IsLayerEnabled(
@@ -718,10 +746,10 @@ namespace Microsoft.Build.Execution
                     }
                     keys.Add(k);
                 }
-                keys.Sort(StringComparer.OrdinalIgnoreCase);
+                keys.Sort(CompareMSBuildIdentifierForCacheKey);
                 foreach (var k in keys)
                 {
-                    sb.Append("g:").Append(k).Append('=').Append(globalProperties[k] ?? string.Empty).Append('\n');
+                    sb.Append("g:").Append(CanonicalizeMSBuildIdentifierForCacheKey(k)).Append('=').Append(globalProperties[k] ?? string.Empty).Append('\n');
                 }
             }
 
@@ -735,7 +763,11 @@ namespace Microsoft.Build.Execution
                         tlist.Add(targets[i]);
                     }
                 }
-                tlist.Sort(StringComparer.OrdinalIgnoreCase);
+                tlist.Sort(CompareMSBuildIdentifierForCacheKey);
+                for (int i = 0; i < tlist.Count; i++)
+                {
+                    tlist[i] = CanonicalizeMSBuildIdentifierForCacheKey(tlist[i]);
+                }
                 sb.Append("t=").Append(string.Join(",", tlist)).Append('\n');
             }
             else

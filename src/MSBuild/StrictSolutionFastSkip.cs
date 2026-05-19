@@ -292,14 +292,14 @@ namespace Microsoft.Build.Strict
             sb.Append(Path.GetFullPath(projectFile)).Append('\n');
             if (targets != null)
             {
-                Array.Sort(targets, StringComparer.Ordinal);
-                foreach (var t in targets) { sb.Append("t:").Append(t).Append('\n'); }
+                Array.Sort(targets, CompareMSBuildIdentifierForCacheKey);
+                foreach (var t in targets) { sb.Append("t:").Append(CanonicalizeMSBuildIdentifierForCacheKey(t)).Append('\n'); }
             }
             if (globalProperties != null)
             {
                 var keys = new List<string>(globalProperties.Keys);
-                keys.Sort(StringComparer.OrdinalIgnoreCase);
-                foreach (var k in keys) { sb.Append("g:").Append(k).Append('=').Append(globalProperties[k]).Append('\n'); }
+                keys.Sort(CompareMSBuildIdentifierForCacheKey);
+                foreach (var k in keys) { sb.Append("g:").Append(CanonicalizeMSBuildIdentifierForCacheKey(k)).Append('=').Append(globalProperties[k]).Append('\n'); }
             }
             StrictCacheKeyEnvironment.AppendFingerprint(sb, StrictCacheKeyEnvironment.GetConfiguredValue(globalProperties));
             byte[] h;
@@ -310,6 +310,34 @@ namespace Microsoft.Build.Strict
             var hex = new StringBuilder(h.Length * 2);
             foreach (byte b in h) { hex.Append(b.ToString("x2")); }
             return hex.ToString().Substring(0, 24);
+        }
+
+        private static int CompareMSBuildIdentifierForCacheKey(string left, string right)
+        {
+            return StringComparer.Ordinal.Compare(
+                CanonicalizeMSBuildIdentifierForCacheKey(left),
+                CanonicalizeMSBuildIdentifierForCacheKey(right));
+        }
+
+        private static string CanonicalizeMSBuildIdentifierForCacheKey(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return value ?? string.Empty;
+            }
+
+            char[] chars = null;
+            for (int i = 0; i < value.Length; i++)
+            {
+                char c = value[i];
+                if (c is >= 'a' and <= 'z')
+                {
+                    chars ??= value.ToCharArray();
+                    chars[i] = (char)(c - ('a' - 'A'));
+                }
+            }
+
+            return chars is null ? value : new string(chars);
         }
 
         private static Dictionary<string, Stat> EnumerateInputs(string root, out Dictionary<string, long> dirs)

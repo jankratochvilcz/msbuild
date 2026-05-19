@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.IO;
 
 using Microsoft.Build.BackEnd;
+using Microsoft.Build.Collections;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
 using Microsoft.Build.UnitTests;
@@ -330,8 +331,8 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
         public void GlobalPropertyChange_InvalidatesCache()
         {
             var targets = new[] { "Build" };
-            var debug   = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["Configuration"] = "Debug" };
-            var release = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["Configuration"] = "Release" };
+            var debug   = new Dictionary<string, string>(MSBuildNameIgnoreCaseComparer.Default) { ["Configuration"] = "Debug" };
+            var release = new Dictionary<string, string>(MSBuildNameIgnoreCaseComparer.Default) { ["Configuration"] = "Release" };
 
             SeedHit(debug, targets);
             StrictProjectCache.TryHit(_projectPath, debug, targets, BuildRequestDataFlags.None, out _, out string r1).ShouldNotBeNull();
@@ -340,6 +341,27 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             // Different global property value => different cache key => miss.
             StrictProjectCache.TryHit(_projectPath, release, targets, BuildRequestDataFlags.None, out _, out string r2).ShouldBeNull();
             r2.ShouldBe("no-manifest");
+        }
+
+        [Fact]
+        public void GlobalPropertyNameComparison_UsesMsbuildComparer()
+        {
+            var targets = new[] { "Build" };
+            var upper = new Dictionary<string, string>(MSBuildNameIgnoreCaseComparer.Default)
+            {
+                ["FOO"] = "Debug",
+            };
+            var lower = new Dictionary<string, string>(MSBuildNameIgnoreCaseComparer.Default)
+            {
+                ["foo"] = "Debug",
+            };
+
+            SeedHit(upper, targets);
+            StrictProjectCache.TryHit(_projectPath, upper, targets, BuildRequestDataFlags.None, out _, out string r1).ShouldNotBeNull();
+            r1.ShouldBe("hit");
+
+            StrictProjectCache.TryHit(_projectPath, lower, targets, BuildRequestDataFlags.None, out _, out string r2).ShouldNotBeNull();
+            r2.ShouldBe("hit");
         }
 
         [Fact]

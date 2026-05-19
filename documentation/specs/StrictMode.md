@@ -122,6 +122,8 @@ and target cache keys. Use `$(StrictModeCacheKeyEnvVars)` to override the list f
 `BUILD_*;DOTNET_*;MSBUILD_*;NUGET_*;RID;LANG;LC_ALL;LC_MESSAGES;LANGUAGE`
 
 Each cache key includes the resolved `name=value` pairs for matching variables, sorted ordinal by variable name.
+
+For MSBuild identifiers that participate in strict-mode cache keys (global property names and requested target names), strict mode uses `MSBuildNameIgnoreCaseComparer.Default` rather than `StringComparer.OrdinalIgnoreCase`. That keeps cache-key ordering aligned with the engine's own property/target name semantics.
 Strict Mode also excludes a small set of known volatile variables even when they match the allow-list, currently
 `MSBUILDSTRICT*` telemetry variables and `DOTNET_CLI_TELEMETRY_SESSIONID`. Environment variables that are not
 matched by `$(StrictModeCacheKeyEnvVars)` are assumed not to affect build outputs.
