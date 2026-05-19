@@ -137,6 +137,54 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             File.Exists(outputPath).ShouldBeTrue("strict-mode cache HIT should restore declared outputs");
         }
 
+        [Fact]
+        public void E2E_LegacyTargetCacheLayout_IsIgnored_AndStaleEntriesAreSwept()
+        {
+            var (projectPath, _, outputPath) = WriteDemoProject(strictMode: "warn", writeUndeclared: false);
+            string projectDir = Path.GetDirectoryName(projectPath);
+            string cacheContainerRoot = Path.Combine(projectDir, "obj", ".strict-cache");
+            string legacyEntryDir = Path.Combine(cacheContainerRoot, "DoWork", "legacy-key");
+            string legacyDeclDir = Path.Combine(legacyEntryDir, "out", "decl");
+            string legacyOkPath = Path.Combine(legacyEntryDir, ".ok");
+            string legacyPayloadPath = Path.Combine(legacyDeclDir, "0000_declared.out");
+            string legacySidecarPath = Path.Combine(cacheContainerRoot, "inputs.stamp");
+
+            Directory.CreateDirectory(legacyDeclDir);
+            File.WriteAllText(legacyOkPath, "legacy");
+            File.WriteAllText(legacyPayloadPath, "stale");
+            File.WriteAllText(legacySidecarPath, "old-sidecar");
+
+            DateTime staleWrite = DateTime.UtcNow.AddDays(-30);
+            SetTreeLastWriteTimeUtc(Path.Combine(cacheContainerRoot, "DoWork"), staleWrite);
+            File.SetLastWriteTimeUtc(legacySidecarPath, staleWrite);
+
+            MockLogger logger = BuildOnce(projectPath);
+            logger.AssertLogContains("INSIDE_TARGET_BODY");
+            File.ReadAllText(outputPath).Trim().ShouldBe("produced");
+
+            Directory.Exists(legacyEntryDir).ShouldBeFalse();
+            File.Exists(legacySidecarPath).ShouldBeFalse();
+
+            string versionedRoot = Path.Combine(cacheContainerRoot, "v1", "DoWork");
+            Directory.Exists(versionedRoot).ShouldBeTrue();
+            Directory.GetFiles(versionedRoot, ".ok", SearchOption.AllDirectories).Length.ShouldBeGreaterThan(0);
+
+            static void SetTreeLastWriteTimeUtc(string root, DateTime value)
+            {
+                foreach (string file in Directory.GetFiles(root, "*", SearchOption.AllDirectories))
+                {
+                    File.SetLastWriteTimeUtc(file, value);
+                }
+
+                foreach (string dir in Directory.GetDirectories(root, "*", SearchOption.AllDirectories))
+                {
+                    Directory.SetLastWriteTimeUtc(dir, value);
+                }
+
+                Directory.SetLastWriteTimeUtc(root, value);
+            }
+        }
+
         /// <summary>
         /// With strict mode OFF (default), the strict cache must NOT engage:
         /// the target body must run on every build regardless of input changes.

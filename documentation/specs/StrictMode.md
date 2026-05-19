@@ -136,21 +136,24 @@ written when strict mode is off.
 | ----- | ---------- | ----------------- | -------------- | ------ |
 | `StrictSolutionFastSkip` | `<workload-root>\.strict-fastskip\` | `<sha256(args)>.manifest` | 2 | `src/MSBuild/StrictSolutionFastSkip.cs` |
 | `StrictProjectCache` | `<ProjectDir>\obj\.strict-project\` | `<sha256(key)>.manifest` | 1 | `src/Build/BackEnd/BuildManager/StrictProjectCache.cs` |
-| `StrictTargetCache` | `$(BaseIntermediateOutputPath)\.strict-cache\<target>\<sha256(key)>\` | `out\decl\`, `out\obs\`, `observed.list`, `.ok`, `inputs.stamp` (per project, alongside) | n/a (per-file format) | `src/Build/BackEnd/Components/RequestBuilder/StrictTargetCache.cs` |
+| `StrictTargetCache` | `$(BaseIntermediateOutputPath)\.strict-cache\v1\<target>\<sha256(key)>\` | `out\decl\`, `out\obs\`, `observed.list`, `.ok`, `inputs.stamp` (per project, under `v1\`) | 1 (path-segment schema) | `src/Build/BackEnd/Components/RequestBuilder/StrictTargetCache.cs` |
 
 Notes:
 
-- All three formats are versioned with a single integer at the head of the file (`SchemaVersion`). A manifest
-  with the wrong schema version is treated as a miss and is silently overwritten on the next successful build.
-  There is **no** migration code today; bumping the schema version is the only supported "invalidate the world"
-  operation.
+- `StrictProjectCache` and `StrictSolutionFastSkip` version their manifests with a `SchemaVersion` integer at the
+  head of the file. `StrictTargetCache` versions its on-disk layout with the `v<N>` path segment under
+  `.strict-cache\`. A cache entry with the wrong schema version is treated as a miss and is silently overwritten on
+  the next successful build. There is **no** migration code today; bumping the schema version is the only supported
+  "invalidate the world" operation.
 - Manifest writes are atomic: every layer writes to `<final>.tmp.<pid>.<guid>` and then `File.Move(overwrite:true)`
   to publish. A crashed build leaves a `.tmp.<pid>.<guid>` orphan that no future build reads. (Orphan cleanup is
   tracked by issue #10.)
 - The target cache uses a content-addressed directory tree per `(target, key)` rather than a single manifest file;
-  the `.ok` marker is the commit signal — if it is absent, the directory is treated as a partial write and
-  ignored.
-- A per-project `inputs.stamp` sidecar (under `.strict-cache\inputs.stamp`) memoises file-content hashes across
+  the schema version is the `v1\` path segment under `.strict-cache\`, and the `.ok` marker is the commit signal —
+  if it is absent, the directory is treated as a partial write and ignored. Builds only read the current schema
+  directory; sibling files or directories under `.strict-cache\` are ignored and best-effort garbage-collected once
+  they are older than 14 days.
+- A per-project `inputs.stamp` sidecar (under `.strict-cache\v1\inputs.stamp`) memoises file-content hashes across
   targets to avoid re-hashing the same source file N times per build. Sidecars are loaded once per process and
   flushed at the end of the build.
 

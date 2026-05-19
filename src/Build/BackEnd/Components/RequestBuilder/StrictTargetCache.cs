@@ -42,8 +42,9 @@ namespace Microsoft.Build.BackEnd
     /// outputs (compensates for under-declared <c>Outputs=</c>, which is common in practice
     /// and impossible to enforce on macOS without sandboxing).
     ///
-    /// The cache is rooted at <c>$(BaseIntermediateOutputPath).strict-cache</c> so
-    /// <c>dotnet clean</c> retains it, while <c>git clean -dxf</c> nukes it.
+    /// The cache is rooted at <c>$(BaseIntermediateOutputPath).strict-cache\v1</c> so
+    /// bumping the on-disk format is a path change, <c>dotnet clean</c> retains it, and
+    /// <c>git clean -dxf</c> nukes it.
     /// </summary>
     internal sealed class StrictTargetCache
     {
@@ -51,6 +52,11 @@ namespace Microsoft.Build.BackEnd
 
         /// <summary>Default 1 GiB. Override via $(MSBuildStrictCacheMaxBytes) or MSBUILDSTRICTCACHEMAXBYTES.</summary>
         private const long DefaultCacheMaxBytes = 1024L * 1024L * 1024L;
+        private const string CacheDirName = ".strict-cache";
+        private const int CacheSchemaVersion = 1;
+        private const int SchemaLayoutRetentionDays = 14;
+
+        private static readonly string s_currentSchemaDirName = $"v{CacheSchemaVersion}";
 
         internal static bool IsEnabled(ProjectInstance project) => GetMode(project) != Mode.Off;
 
@@ -534,6 +540,10 @@ namespace Microsoft.Build.BackEnd
         private static readonly ConcurrentDictionary<string, object> s_sidecarLocks
             = new(StringComparer.OrdinalIgnoreCase);
 
+        // Per-project cache container roots already checked for stale schema siblings.
+        private static readonly ConcurrentDictionary<string, byte> s_schemaRootsMaintained
+            = new(StringComparer.OrdinalIgnoreCase);
+
         private static int s_exitHookInstalled;
 
         private void EnsureSidecarLoaded(string sidecarPath)
@@ -630,15 +640,10 @@ namespace Microsoft.Build.BackEnd
         {
             // Write entries from the global hash cache whose absolute path lives under the
             // sidecar's project root. Path prefix matching is OS-case-correct on Windows.
-            string root = Path.GetDirectoryName(Path.GetDirectoryName(sidecarPath)); // strip .strict-cache/inputs.stamp
-            if (string.IsNullOrEmpty(root))
-            {
-                return;
-            }
-            string projectRoot = Path.GetDirectoryName(root); // strip "obj"
+            string projectRoot = GetProjectRootForSidecar(sidecarPath);
             if (string.IsNullOrEmpty(projectRoot))
             {
-                projectRoot = root;
+                return;
             }
             try
             {
@@ -676,13 +681,20 @@ namespace Microsoft.Build.BackEnd
 
         private string GetCacheRoot()
         {
+            string cacheContainerRoot = GetCacheContainerRoot();
+            MaintainSchemaLayout(cacheContainerRoot);
+            return Path.Combine(cacheContainerRoot, s_currentSchemaDirName);
+        }
+
+        private string GetCacheContainerRoot()
+        {
             string baseIntermediate = _project.GetPropertyValue("BaseIntermediateOutputPath");
             if (string.IsNullOrEmpty(baseIntermediate))
             {
                 baseIntermediate = "obj" + Path.DirectorySeparatorChar;
             }
             string full = Path.Combine(_project.Directory, baseIntermediate);
-            return Path.Combine(full, ".strict-cache");
+            return Path.Combine(full, CacheDirName);
         }
 
         private string GetIntermediateRoot()
@@ -919,6 +931,87 @@ namespace Microsoft.Build.BackEnd
                 return true;
             }
             return c.StartsWith(r + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string GetProjectRootForSidecar(string sidecarPath)
+        {
+            string sidecarDir = Path.GetDirectoryName(sidecarPath);
+            if (string.IsNullOrEmpty(sidecarDir))
+            {
+                return null;
+            }
+
+            string cacheContainerRoot = Path.GetDirectoryName(sidecarDir);
+            if (string.IsNullOrEmpty(cacheContainerRoot))
+            {
+                return null;
+            }
+
+            string objRoot;
+            if (string.Equals(Path.GetFileName(cacheContainerRoot), CacheDirName, StringComparison.OrdinalIgnoreCase))
+            {
+                objRoot = Path.GetDirectoryName(cacheContainerRoot);
+            }
+            else
+            {
+                objRoot = cacheContainerRoot;
+            }
+
+            if (string.IsNullOrEmpty(objRoot))
+            {
+                return null;
+            }
+
+            return Path.GetDirectoryName(objRoot) ?? objRoot;
+        }
+
+        private static void MaintainSchemaLayout(string cacheContainerRoot)
+        {
+            if (string.IsNullOrEmpty(cacheContainerRoot) || !s_schemaRootsMaintained.TryAdd(cacheContainerRoot, 1))
+            {
+                return;
+            }
+
+            try
+            {
+                if (!Directory.Exists(cacheContainerRoot))
+                {
+                    return;
+                }
+
+                DateTime cutoff = DateTime.UtcNow.AddDays(-SchemaLayoutRetentionDays);
+
+                foreach (string entry in Directory.EnumerateFileSystemEntries(cacheContainerRoot))
+                {
+                    if (string.Equals(Path.GetFileName(entry), s_currentSchemaDirName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        if (Directory.Exists(entry))
+                        {
+                            if (Directory.GetLastWriteTimeUtc(entry) <= cutoff)
+                            {
+                                Directory.Delete(entry, recursive: true);
+                            }
+                        }
+                        else if (File.Exists(entry) && File.GetLastWriteTimeUtc(entry) <= cutoff)
+                        {
+                            File.Delete(entry);
+                        }
+                    }
+                    catch
+                    {
+                        // Best-effort cleanup only.
+                    }
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup only.
+            }
         }
 
         /// <summary>
