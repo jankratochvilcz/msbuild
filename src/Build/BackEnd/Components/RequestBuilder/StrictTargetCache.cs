@@ -255,6 +255,8 @@ namespace Microsoft.Build.BackEnd
             {
                 return;
             }
+
+            bool failClosedViolation = false;
             try
             {
                 Directory.CreateDirectory(_cacheDir);
@@ -367,6 +369,14 @@ namespace Microsoft.Build.BackEnd
 
                 if (allUndeclared.Count > 0)
                 {
+                    if (_mode == Mode.Enforce)
+                    {
+                        // Fail closed: once we know this target violated strict mode, keep the violation latched
+                        // even if subsequent best-effort logging or cache cleanup throws.
+                        _violationDetected = true;
+                        failClosedViolation = true;
+                    }
+
                     string projRel = Path.GetFullPath(_project.Directory);
                     foreach (string u in allUndeclared)
                     {
@@ -385,7 +395,6 @@ namespace Microsoft.Build.BackEnd
                     }
                     if (_mode == Mode.Enforce)
                     {
-                        _violationDetected = true;
                         // Do not write .ok – cache must not contain a build that violated strict mode.
                         Log(MessageImportance.High,
                             $"[strict] BLOCK {_targetName}  {allUndeclared.Count} undeclared write(s); cache entry discarded.");
@@ -412,6 +421,11 @@ namespace Microsoft.Build.BackEnd
             }
             catch (Exception ex)
             {
+                if (failClosedViolation)
+                {
+                    _violationDetected = true;
+                }
+
                 Log(MessageImportance.Low, $"[strict] cache persist failed for {_targetName}: {ex.Message}");
             }
             finally

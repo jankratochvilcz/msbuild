@@ -270,7 +270,7 @@ forward the project property via `-p:MSBuildStrictMode=warn`. Issue #12 tracks a
 
 | Code         | Severity (mode) | Meaning |
 | ------------ | --------------- | ------- |
-| `MSBSTRICT001` | warning (warn) / error (enforce) | A target wrote to a path outside its declared `Outputs="..."`, `$(IntermediateOutputPath)`, and `$(StrictAllowedOutputDirs)`. In `enforce` mode the target's cache entry is discarded. |
+| `MSBSTRICT001` | warning (warn) / error (enforce) | A target wrote to a path outside its declared `Outputs="..."`, `$(IntermediateOutputPath)`, and `$(StrictAllowedOutputDirs)`. In `enforce` mode the target's cache entry is discarded, and the violation remains latched even if best-effort persistence logging later fails. |
 
 `MSBSTRICT002` (unsanctioned reads, requires file-access reporting) is reserved for the work in issue #5.
 

@@ -4,7 +4,11 @@
 using System;
 using System.IO;
 using Microsoft.Build.BackEnd;
+using Microsoft.Build.BackEnd.Logging;
+using Microsoft.Build.Evaluation;
 using Microsoft.Build.Execution;
+using Microsoft.Build.Framework;
+using Microsoft.Build.Shared;
 using Microsoft.Build.UnitTests;
 using Shouldly;
 using Xunit;
@@ -228,6 +232,32 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             logger.AssertLogContains("MSBSTRICT001");
         }
 
+        [Fact]
+        public void PersistOnSuccess_EnforceViolationRemainsLatched_WhenLoggingFallbackThrows()
+        {
+            var (projectPath, inputPath, outputPath) = WriteDemoProject(strictMode: "enforce", writeUndeclared: false);
+            string projectDir = Path.GetDirectoryName(projectPath);
+            string undeclaredPath = Path.Combine(projectDir, "obj", "undeclared.out");
+            string cacheRoot = Path.Combine(projectDir, "obj", ".strict-cache");
+            ProjectInstance project = new Project(projectPath).CreateProjectInstance();
+            var cache = new StrictTargetCache(project, "DoWork", new ThrowOnFirstStrictViolationLogsLoggingService(), new BuildEventContext(1, 2, 3, 4));
+
+            cache.TryRestore(new[] { inputPath }, new[] { @"obj\declared.out" }).ShouldBeFalse();
+            cache.HasPendingPersist.ShouldBeTrue();
+
+            Directory.CreateDirectory(Path.GetDirectoryName(outputPath));
+            File.WriteAllText(outputPath, "produced");
+            File.WriteAllText(undeclaredPath, "violation");
+
+            Should.NotThrow(() => cache.PersistOnSuccess());
+            cache.HasViolation.ShouldBeTrue();
+            cache.HasPendingPersist.ShouldBeFalse();
+            if (Directory.Exists(cacheRoot))
+            {
+                Directory.GetFiles(cacheRoot, ".ok", SearchOption.AllDirectories).ShouldBeEmpty();
+            }
+        }
+
         /// <summary>
         /// An exempted target must behave exactly as if strict mode were off for that target:
         /// the strict cache does not engage, so the body runs on every build.
@@ -428,6 +458,32 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
                 result.OverallResult.ShouldBe(BuildResultCode.Failure);
             }
             return session.Logger;
+        }
+
+        private sealed class ThrowOnFirstStrictViolationLogsLoggingService : Microsoft.Build.UnitTests.BackEnd.MockLoggingService, ILoggingService
+        {
+            private int _remainingThrows = 2;
+
+            void ILoggingService.LogErrorFromText(BuildEventContext buildEventContext, string subcategoryResourceName, string errorCode, string helpKeyword, BuildEventFileInfo file, string message)
+            {
+                ThrowOrForward(errorCode == "MSBSTRICT001", () => base.LogErrorFromText(buildEventContext, subcategoryResourceName, errorCode, helpKeyword, file, message));
+            }
+
+            void ILoggingService.LogCommentFromText(BuildEventContext buildEventContext, MessageImportance importance, string message)
+            {
+                ThrowOrForward(message?.Contains("MSBSTRICT001", StringComparison.Ordinal) == true, () => base.LogCommentFromText(buildEventContext, importance, message));
+            }
+
+            private void ThrowOrForward(bool shouldThrow, Action forward)
+            {
+                if (shouldThrow && _remainingThrows > 0)
+                {
+                    _remainingThrows--;
+                    throw new InvalidOperationException("Injected logging failure.");
+                }
+
+                forward();
+            }
         }
     }
 }
