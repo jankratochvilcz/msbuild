@@ -111,12 +111,12 @@ $shortDesc = ($next.Title -replace '^Strict mode: ','' -replace '[^a-zA-Z0-9]+',
 $label     = "issue-$issueNum-$shortDesc".Substring(0,[Math]::Min(64,"issue-$issueNum-$shortDesc".Length))
 $notes     = "Issue jankratochvilcz/msbuild#$issueNum: $($next.Title). Release bootstrap built via .\build.cmd -configuration Release."
 
-pwsh -File scripts\bench.ps1 `
-  -MSBuildPath local-release `
-  -MSBuildLabel $label `
-  -Tag "strict-mode-issue-$issueNum" `
-  -Runs 5 `
-  -Notes $notes
+dotnet run --project tools\BenchRunner -c Release -- `
+  --msbuild-path local-release `
+  --msbuild-label $label `
+  --tag "strict-mode-issue-$issueNum" `
+  --notes $notes `
+  --runs 5
 ```
 
 Capture the new `bench_run.id` printed in the script header (look for `bench_run.id = <N>`).
@@ -284,15 +284,12 @@ The fixed scenario set today is: `cold-clean`, `cold-cached`, `noop`, `touch-lea
 | Issue about **multi-target inner/outer staleness** | `edit-tfm-inner` — edits inside `Modules.Blog` while it targets `net8.0;net10.0` |
 | Issue about **multi-proc node behavior** | `noop-parallel` — `-maxcpucount:8` baseline-vs-strict comparison |
 
-How to add one (interim — until msbuild-perf-bench#1 lands the JSON-per-scenario runner):
+How to add one:
 
-1. Edit `scripts/bench.ps1` and add a `Bench-Cell '<name>' $false { <prep> }` + `$true { <prep> }` pair at the bottom of the scenario block (around line 343).
-2. If the scenario is incremental and should run with `--no-restore`, add it to `$incrementalScenarios`.
-3. Add a row to the dashboard scenario-reference panel in `bench-stack/grafana/dashboards/03-baseline-comparison.json` (description + ordering).
-4. Bump the dashboard `version` field by 1 and restart Grafana: `docker restart msb-bench-grafana`.
-5. Mention the new scenario by name in **both** the current issue's resolution comment and the bench-expectations table of any future related issue.
-
-Once `jankratochvilcz/msbuild-perf-bench#1` (the JSON-scenario runner redesign) lands, replace steps 1–4 with "drop a JSON file in `scenarios/`".
+1. Drop a JSON file in `C:\Users\jankratochvl\src\msbuild-perf-bench\scenarios\` following the schema in `scenarios\_schema.v1.json`. Use one of the existing files (e.g. `20-noop.json`, `30-touch-leaf.json`) as a template. Closed prep vocabulary: `clean-all`, `clean-bin-only`, `noop`, `touch-file`, `toggle-marker`, `exec`. Known path placeholders: `${workload}`, `${workload-dir}`, `${first-csproj}`, `${leaf-csproj-source}`, `${root-csproj-source}`.
+2. Validate: `dotnet run --project tools\BenchRunner -- --validate`. Fix any errors it reports before continuing.
+3. The Grafana scenario-reference panel now JOINs `bench_scenario`, so descriptions surface automatically the first time you run the bench (no dashboard JSON edit, no `docker restart` needed).
+4. Mention the new scenario by name in the current issue's resolution comment and the bench-expectations table of any future related issue.
 
 ## Failure modes
 
@@ -303,6 +300,7 @@ Once `jankratochvilcz/msbuild-perf-bench#1` (the JSON-scenario runner redesign) 
 | Push to `origin` fails with "permission denied" | You are not authenticated. Re-run the `GH_TOKEN` snippet. **Never `git push upstream`** as a workaround. |
 | `gh` reports "issues are disabled" | `gh repo edit jankratochvilcz/<repo> --enable-issues=true`. |
 | The bench errors before iter 0 | Check Postgres is up: `docker ps`. Start it: `cd msbuild-perf-bench\bench-stack; docker compose up -d`. |
+| `dotnet run --project tools\BenchRunner -- --validate` reports a schema error | A scenario JSON is malformed or uses an unknown placeholder/action. The error message names the file and the issue. Fix the JSON; re-run `--validate`; commit. |
 | Telemetry rows missing from `v_cache_hit_rate` | The change broke `MSBUILDSTRICTTELEMETRYFILE` emission. Block the issue's close; file a P0. |
 
 ## Bookkeeping at the end of every run
@@ -312,10 +310,10 @@ After step 6 (or step 7 if you only filed follow-ups):
 1. Print a one-line summary: `Closed #<N>, opened follow-ups: #<M>, #<P>; bench run <newRun> all within tolerance`.
 2. Make sure the `in-progress` label is removed.
 3. Make sure the epic (#2) task list reflects the newly-closed item (strike-through is automatic when the issue is closed; new items must be added manually).
-4. If you added a new bench scenario, update `msbuild-perf-bench/AGENTS.md` "Scenario inventory" section.
+4. If you added a new bench scenario, the new scenario's JSON file in `msbuild-perf-bench/scenarios/` IS the inventory entry; no extra `AGENTS.md` edit is required. If the scenario warrants an expected-speedup band, set `expectations.expectedSpeedupStrictOnVsOffMin/Max` in the JSON and the runner's post-bench validation report will start enforcing it.
 
 ## When not to use this skill
 
 - The user wants to **review** a strict-mode issue, not implement it. Read the issue and respond; don't pick up the `in-progress` label.
 - The user wants to land a change in the **upstream** dotnet/msbuild repo. This skill is fork-only.
-- The bench harness itself is broken (`bench.ps1` crashes before iter 0). Repair the harness first via `msbuild-perf-bench` repo.
+- The bench harness itself is broken (`dotnet run --project tools\BenchRunner` crashes before iter 0, or `--validate` fails for a clean JSON). Repair the harness first via `msbuild-perf-bench` repo.
