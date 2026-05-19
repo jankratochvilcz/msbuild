@@ -211,15 +211,19 @@ Schema (every field except `ts`, `layer`, and `outcome` is optional):
   "ts": "ISO 8601 UTC, e.g. 2026-05-19T16:29:42.0123456Z",
   "iteration": 7,
   "layer": "solution-fastskip | project-fastskip | target-cache",
-  "outcome": "hit | miss | store",
+  "outcome": "hit | miss | store | summary",
   "project": "<absolute project path>",
   "target": "<target name(s)>",
   "reason": "<short diagnostic string>",
+  "reason_code": "NoManifest | InputChanged | OutputMissingOrChanged | ...",
   "duration_us": 12345,
   "bytes_in": 0,
   "bytes_out": 0,
   "file_count": 0,
-  "cache_key": "<sha256 hex>"
+  "cache_key": "<sha256 hex>",
+  "summary_kind": "outcome | reason",
+  "summary_outcome": "hit | miss | store | error | skip",
+  "count": 12
 }
 ```
 
@@ -227,8 +231,9 @@ The optional `MSBUILDSTRICTTELEMETRYITER` environment variable is included verba
 JSONL file can host multiple iterations of the same scenario (e.g. for the bench harness). Telemetry is a
 best-effort sink: it must never break a build, and every exception inside `StrictTelemetry.Emit` is swallowed.
 
-`reason` strings are currently heterogeneous and not part of the contract — issue #15 tracks introducing a
-structured set of cache-miss reason codes and a binlog-friendly event.
+`reason` remains the human-readable diagnostic string. `reason_code` is the stable bucket used for aggregation, and
+on process exit each node appends `outcome="summary"` rows that aggregate both per-layer outcome counts and
+per-layer/per-outcome reason-code counts for the events that were emitted by that process.
 
 ## Configuration reference
 
