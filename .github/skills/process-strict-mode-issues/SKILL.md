@@ -197,6 +197,35 @@ gh issue edit    $issueNum --repo jankratochvilcz/msbuild --remove-label "in-pro
 Remove-Item $tmp
 ```
 
+### Move the card to **Done** on the Strict Mode project board
+
+The "Strict Mode" project (org `jankratochvilcz`, project number `1`,
+id `PVT_kwHOACGbd84BYLZ0`) tracks every strict-mode issue on a kanban board.
+Closing the issue does **not** auto-move the card — you must move it explicitly.
+Do this for **every** issue in the same shell as the close, immediately after:
+
+```powershell
+# Status field + option ids (stable; cache them in the skill):
+#   Status field id        = PVTSSF_lAHOACGbd84BYLZ0zhTTChc
+#   Backlog                = cc8b62ac
+#   Ready                  = 1d58f06d
+#   In Progress            = f9b11ec8
+#   In Review              = 0035d23e
+#   Blocked                = c5259013
+#   Done                   = 340c2f00
+$itemId = (gh project item-list 1 --owner jankratochvilcz --limit 200 --format json `
+  | ConvertFrom-Json).items | Where-Object { $_.content.number -eq $issueNum } | Select-Object -ExpandProperty id
+gh project item-edit --id $itemId `
+  --project-id PVT_kwHOACGbd84BYLZ0 `
+  --field-id PVTSSF_lAHOACGbd84BYLZ0zhTTChc `
+  --single-select-option-id 340c2f00
+```
+
+Same idiom moves a card to **In Progress** (`f9b11ec8`) when you claim it in
+Step 1, or to **Blocked** (`c5259013`) when you bail out per Step 5. Keep the
+board and the `in-progress` label in sync — the label is the lock against
+double-work, the board column is the human-readable status.
+
 ## Step 7 — File follow-up issues for anything surfaced
 
 If during the work you discover problems out of scope of the current issue (a deeper bug, a missing test class, a brittle assumption in adjacent code, a missing bench scenario), file each as a **new** strict-mode issue using the template below. Do not pile them into the current issue's resolution.
