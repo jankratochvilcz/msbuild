@@ -237,11 +237,37 @@ namespace Microsoft.Build.Strict
             }
         }
 
+        internal sealed class PreBuildInputSnapshot
+        {
+            public string Root;
+            public Dictionary<string, Stat> Inputs;
+        }
+
+        internal static PreBuildInputSnapshot CapturePreBuildInputSnapshot(string projectFile)
+        {
+            if (string.IsNullOrEmpty(projectFile) || !File.Exists(projectFile))
+            {
+                return null;
+            }
+
+            string root = Path.GetDirectoryName(Path.GetFullPath(projectFile));
+            return new PreBuildInputSnapshot
+            {
+                Root = root,
+                Inputs = EnumerateInputs(root, out _),
+            };
+        }
+
         /// <summary>
         /// Records the post-build manifest so the next invocation can fast-skip.
         /// Call this only after a successful build.
         /// </summary>
         public static void RecordSuccess(string projectFile, string[] targets, IDictionary<string, string> globalProperties)
+        {
+            RecordSuccess(projectFile, targets, globalProperties, preBuildInputs: null);
+        }
+
+        internal static void RecordSuccess(string projectFile, string[] targets, IDictionary<string, string> globalProperties, PreBuildInputSnapshot preBuildInputs)
         {
             if (!IsEnabled())
             {
@@ -256,13 +282,17 @@ namespace Microsoft.Build.Strict
                 Directory.CreateDirectory(cacheDir);
                 string manifestPath = Path.Combine(cacheDir, ComputeArgKey(projectFile, targets, globalProperties) + ".manifest");
 
+                Dictionary<string, Stat> inputs = EnumerateInputs(root, out var dirs);
+                Dictionary<string, Stat> outputs = EnumerateOutputs(root);
+                ReclassifyBuildWrittenInputs(root, preBuildInputs, inputs, outputs);
+
                 var m = new Manifest
                 {
                     SchemaVersion = 2,
                     ProjectFile = projectFile,
                     RecordedAt = DateTime.UtcNow.Ticks,
-                    Inputs = EnumerateInputs(root, out var dirs),
-                    Outputs = EnumerateOutputs(root),
+                    Inputs = inputs,
+                    Outputs = outputs,
                     InputDirs = dirs,
                 };
                 inputCount = m.Inputs.Count;
@@ -389,6 +419,35 @@ namespace Microsoft.Build.Strict
             return result;
         }
 
+        private static void ReclassifyBuildWrittenInputs(string root, PreBuildInputSnapshot preBuildInputs, Dictionary<string, Stat> currentInputs, Dictionary<string, Stat> outputs)
+        {
+            if (preBuildInputs?.Inputs == null || !string.Equals(preBuildInputs.Root, root, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            foreach (var kv in currentInputs)
+            {
+                if (!preBuildInputs.Inputs.TryGetValue(kv.Key, out var preBuildStat)
+                    || preBuildStat.Ticks != kv.Value.Ticks
+                    || preBuildStat.Size != kv.Value.Size)
+                {
+                    outputs[kv.Key] = kv.Value;
+                }
+            }
+
+            foreach (string inputPath in new List<string>(currentInputs.Keys))
+            {
+                if (!preBuildInputs.Inputs.TryGetValue(inputPath, out var preBuildStat)
+                    || !currentInputs.TryGetValue(inputPath, out var postBuildStat)
+                    || preBuildStat.Ticks != postBuildStat.Ticks
+                    || preBuildStat.Size != postBuildStat.Size)
+                {
+                    currentInputs.Remove(inputPath);
+                }
+            }
+        }
+
         private static Dictionary<string, Stat> EnumerateOutputs(string root)
         {
             var result = new Dictionary<string, Stat>(StringComparer.OrdinalIgnoreCase);
@@ -461,7 +520,7 @@ namespace Microsoft.Build.Strict
             catch { }
         }
 
-        private readonly struct Stat
+        internal readonly struct Stat
         {
             public Stat(long ticks, long size) { Ticks = ticks; Size = size; }
             public long Ticks { get; }

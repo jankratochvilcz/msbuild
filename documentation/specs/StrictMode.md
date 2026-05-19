@@ -150,6 +150,9 @@ Notes:
 - Manifest writes are atomic: every layer writes to `<final>.tmp.<pid>.<guid>` and then `File.Move(overwrite:true)`
   to publish. For `StrictProjectCache`, a subsequent save best-effort deletes sibling temp manifests older than 1 hour
   before publishing the new manifest, so crash leftovers do not accumulate indefinitely.
+- `StrictSolutionFastSkip` snapshots scanned inputs before the build and, when recording the success manifest, reclassifies
+  any input-like files the build added or rewrote as `Outputs` instead of `Inputs`. That keeps in-tree generated sources
+  from becoming canonical pre-build inputs while still validating their post-build stamps on the next fast-skip attempt.
 - The target cache uses a content-addressed directory tree per `(target, key)` rather than a single manifest file;
   the schema version is the `v1\` path segment under `.strict-cache\`, and the `.ok` marker is the commit signal —
   if it is absent, the directory is treated as a partial write and ignored. Builds only read the current schema

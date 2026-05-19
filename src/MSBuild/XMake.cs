@@ -853,6 +853,12 @@ namespace Microsoft.Build.CommandLine
                         // input + output stamps still match, bypass the engine entirely. This is the
                         // only practical way to beat the per-project evaluation + restore floor on
                         // a true no-op (~17 s on a 47-project SDK solution -> <1 s on hit).
+                        Microsoft.Build.Strict.StrictSolutionFastSkip.PreBuildInputSnapshot preBuildFastSkipInputs = null;
+                        if (Microsoft.Build.Strict.StrictSolutionFastSkip.IsEnabled())
+                        {
+                            preBuildFastSkipInputs = Microsoft.Build.Strict.StrictSolutionFastSkip.CapturePreBuildInputSnapshot(projectFile);
+                        }
+
                         if (Microsoft.Build.Strict.StrictSolutionFastSkip.TryFastSkip(projectFile, targets, globalProperties, out string fastSkipReason))
                         {
                             Console.Out.WriteLine($"[strict] fast-skip HIT ({fastSkipReason}) — build skipped");
@@ -905,7 +911,7 @@ namespace Microsoft.Build.CommandLine
                         else
                         {
                             // Build succeeded — record manifest for next-invocation fast-skip.
-                            Microsoft.Build.Strict.StrictSolutionFastSkip.RecordSuccess(projectFile, targets, globalProperties);
+                            Microsoft.Build.Strict.StrictSolutionFastSkip.RecordSuccess(projectFile, targets, globalProperties, preBuildFastSkipInputs);
                         }
                     } // end of build
 
