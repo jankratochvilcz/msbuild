@@ -62,6 +62,7 @@
     <Compile Include="..\Shared\ErrorUtilities.cs" />
     <Compile Include="..\Shared\StrictTelemetry.cs" />
     <Compile Include="..\Shared\StrictCacheKeyEnvironment.cs" />
+    <Compile Include="..\Shared\StrictModeSettings.cs" />
     <Compile Include="..\Shared\NamedPipeUtil.cs" />
     <Compile Include="..\GlobalUsings.cs" Link="GlobalUsings.cs" />
     <Compile Include="..\Shared\INodeEndpoint.cs" />

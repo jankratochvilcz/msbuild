@@ -617,6 +617,9 @@
     <Compile Include="..\Shared\StrictCacheKeyEnvironment.cs">
       <Link>SharedUtilities\StrictCacheKeyEnvironment.cs</Link>
     </Compile>
+    <Compile Include="..\Shared\StrictModeSettings.cs">
+      <Link>SharedUtilities\StrictModeSettings.cs</Link>
+    </Compile>
     <Compile Include="..\Shared\InprocTrackingNativeMethods.cs">
       <Link>InprocTrackingNativeMethods.cs</Link>
     </Compile>

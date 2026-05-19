@@ -1311,9 +1311,6 @@ namespace Microsoft.Build.BackEnd
 
         #region MSBuild Strict Mode (content-hash override)
 
-        private static readonly bool s_strictModeEnvOverride =
-            Environment.GetEnvironmentVariable("MSBUILDSTRICTMODE") == "1";
-
         private bool? _strictModeEnabledCache;
 
         private bool StrictModeEnabled
@@ -1324,13 +1321,9 @@ namespace Microsoft.Build.BackEnd
                 {
                     return _strictModeEnabledCache.Value;
                 }
-                bool enabled = s_strictModeEnvOverride;
-                if (!enabled && _project != null)
-                {
-                    string val = _project.GetPropertyValue("MSBuildStrictMode");
-                    enabled = string.Equals(val, "true", StringComparison.OrdinalIgnoreCase) ||
-                              string.Equals(val, "1", StringComparison.Ordinal);
-                }
+                bool enabled = Microsoft.Build.Strict.StrictModeSettings.ResolveLevel(
+                    _project?.GetPropertyValue(Microsoft.Build.Strict.StrictModeSettings.ProjectPropertyName))
+                    != Microsoft.Build.Strict.StrictModeLevel.Off;
                 _strictModeEnabledCache = enabled;
                 return enabled;
             }

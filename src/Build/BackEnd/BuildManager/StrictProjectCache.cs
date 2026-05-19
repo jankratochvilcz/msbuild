@@ -59,8 +59,6 @@ namespace Microsoft.Build.Execution
     internal static class StrictProjectCache
     {
         private const string CacheDirName = ".strict-project";
-        private const string EnvVar = "MSBUILDSTRICTMODE";
-        private const string EnvDisable = "MSBUILDSTRICTNOPROJECTCACHE";
         private const int ManifestSchemaVersion = 1;
 
         // Targets we are willing to synthesise from cache. These are pure "describe what the
@@ -165,19 +163,9 @@ namespace Microsoft.Build.Execution
 
         public static bool IsEnabled()
         {
-            string v = Environment.GetEnvironmentVariable(EnvVar);
-            if (string.IsNullOrEmpty(v))
-            {
-                return false;
-            }
-            if (string.Equals(v, "0", StringComparison.Ordinal)
-                || string.Equals(v, "false", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(v, "off", StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
-            string disable = Environment.GetEnvironmentVariable(EnvDisable);
-            return string.IsNullOrEmpty(disable);
+            return StrictModeSettings.IsLayerEnabled(
+                projectPropertyValue: null,
+                layerDisableEnvVar: StrictModeSettings.EnvDisableProjectCache);
         }
 
         internal static bool TargetsAreCacheable(IReadOnlyList<string> targets, out string reason)

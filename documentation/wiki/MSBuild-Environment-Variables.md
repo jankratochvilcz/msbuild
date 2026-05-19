@@ -38,3 +38,20 @@ Some of the env variables listed here are unsupported, meaning there is no guara
   - Set this to force MSBuild to run in multi-threaded mode (using in-proc nodes for parallel build), equivalent to passing `-multiThreaded` / `-mt` on the command line. Useful for opting in without modifying command lines.
 - `MSBUILD_CONSOLE_USE_DEFAULT_ENCODING`
   - It opts out automatic console encoding UTF-8. Make Console use default encoding in the system.
+
+## Strict Mode (experimental, opt-in)
+
+The Strict Mode feature (see [`documentation/specs/StrictMode.md`](../specs/StrictMode.md)) is gated entirely behind the following environment variables. All are experimental and may change without notice.
+
+- `MSBUILDSTRICTMODE`
+  - Canonical opt-in for every Strict Mode layer. Accepted values (case-insensitive): `0`/`false`/`off`/`no` and unknown values → off; `1`/`true`/`on`/`yes`/`warn` → warn-mode; `enforce`/`strict`/`error` → enforce-mode. Unknown values are treated as off so a typo does not silently enable the feature. Re-read on every call so MSBuild Server / long-lived worker nodes pick up changes between submissions. The `$(MSBuildStrictMode)` project property is also honoured by per-project layers when the env var is unset.
+- `MSBUILDSTRICTNOPROJECTCACHE`
+  - Kill-switch for the project-level Strict cache (`StrictProjectCache`). Set to any non-empty value to disable that layer even when `MSBUILDSTRICTMODE` is otherwise on. Intended for production rollbacks; tests should toggle `MSBUILDSTRICTMODE` instead.
+- `MSBUILDSTRICTNOFASTSKIP`
+  - Kill-switch for the solution-level Strict fast-skip cache (`StrictSolutionFastSkip`). Same semantics as `MSBUILDSTRICTNOPROJECTCACHE`.
+- `MSBUILDSTRICTCACHEMAXBYTES`
+  - Size budget (integer bytes) for the per-project target cache root before opportunistic eviction triggers. Default is 1 GiB (`1073741824`). Overrides the `$(MSBuildStrictCacheMaxBytes)` project property if both are set.
+- `MSBUILDSTRICTTELEMETRYFILE`
+  - If set to a writable path, every Strict Mode cache event (hit / miss / store) is appended as one JSON object per line. Schema is documented in `documentation/specs/StrictMode.md`. Multiple MSBuild nodes (entry + workers) share the file safely. Telemetry must never break a build; all errors inside the sink are swallowed.
+- `MSBUILDSTRICTTELEMETRYITER`
+  - Included verbatim as the `iteration` field on every telemetry line so a single JSONL file can host multiple iterations of the same scenario (e.g. for the bench harness).

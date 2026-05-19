@@ -56,14 +56,16 @@ namespace Microsoft.Build.BackEnd
 
         internal static Mode GetMode(ProjectInstance project)
         {
-            // Re-read the env var on every call (not cached) so MSBuild Server / long-lived nodes pick up changes.
-            Mode envMode = ParseMode(Environment.GetEnvironmentVariable("MSBUILDSTRICTMODE"));
-            if (envMode != Mode.Off)
-            {
-                return envMode;
-            }
-            return ParseMode(project?.GetPropertyValue("MSBuildStrictMode"));
+            return ToMode(StrictModeSettings.ResolveLevel(
+                project?.GetPropertyValue(StrictModeSettings.ProjectPropertyName)));
         }
+
+        private static Mode ToMode(StrictModeLevel level) => level switch
+        {
+            StrictModeLevel.Enforce => Mode.Enforce,
+            StrictModeLevel.Warn => Mode.Warn,
+            _ => Mode.Off,
+        };
 
         /// <summary>True if this target is named in $(MSBuildStrictExemptTargets).</summary>
         internal static bool IsTargetExempt(ProjectInstance project, string targetName)
@@ -85,28 +87,6 @@ namespace Microsoft.Build.BackEnd
                 }
             }
             return false;
-        }
-
-        private static Mode ParseMode(string val)
-        {
-            if (string.IsNullOrEmpty(val))
-            {
-                return Mode.Off;
-            }
-            if (string.Equals(val, "enforce", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(val, "strict", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(val, "error", StringComparison.OrdinalIgnoreCase))
-            {
-                return Mode.Enforce;
-            }
-            if (string.Equals(val, "true", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(val, "1", StringComparison.Ordinal)
-                || string.Equals(val, "warn", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(val, "on", StringComparison.OrdinalIgnoreCase))
-            {
-                return Mode.Warn;
-            }
-            return Mode.Off;
         }
 
         private readonly ProjectInstance _project;

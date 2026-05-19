@@ -34,8 +34,6 @@ namespace Microsoft.Build.Strict
     internal static class StrictSolutionFastSkip
     {
         private const string CacheDirName = ".strict-fastskip";
-        private const string EnvVarMode = "MSBUILDSTRICTMODE";
-        private const string EnvVarDisableSkip = "MSBUILDSTRICTNOFASTSKIP";
 
         // Source/project files whose changes must invalidate the cache.
         private static readonly string[] s_inputExts =
@@ -63,13 +61,9 @@ namespace Microsoft.Build.Strict
 
         public static bool IsEnabled()
         {
-            string v = Environment.GetEnvironmentVariable(EnvVarMode);
-            if (string.IsNullOrEmpty(v) || string.Equals(v, "0", StringComparison.OrdinalIgnoreCase) || string.Equals(v, "off", StringComparison.OrdinalIgnoreCase) || string.Equals(v, "false", StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
-            string disable = Environment.GetEnvironmentVariable(EnvVarDisableSkip);
-            return string.IsNullOrEmpty(disable);
+            return StrictModeSettings.IsLayerEnabled(
+                projectPropertyValue: null,
+                layerDisableEnvVar: StrictModeSettings.EnvDisableSolutionFastSkip);
         }
 
         /// <summary>
