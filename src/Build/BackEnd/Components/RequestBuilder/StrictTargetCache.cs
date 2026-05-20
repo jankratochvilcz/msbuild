@@ -10,6 +10,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 
+using Microsoft.Build.Collections;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
@@ -55,6 +56,11 @@ namespace Microsoft.Build.BackEnd
         private const string CacheDirName = ".strict-cache";
         private const int CacheSchemaVersion = 1;
         private const int SchemaLayoutRetentionDays = 14;
+        private const string CacheKeyPropertiesPropertyName = "StrictModeCacheKeyProperties";
+        private const string CacheKeyItemMetadataPropertyName = "StrictModeCacheKeyItemMetadata";
+
+        private static readonly StringComparer s_msbuildNameComparer = StringComparer.OrdinalIgnoreCase;
+        private static readonly MetadataReferenceComparer s_metadataReferenceComparer = new();
 
         private static readonly string s_currentSchemaDirName = $"v{CacheSchemaVersion}";
 
@@ -482,6 +488,7 @@ namespace Microsoft.Build.BackEnd
             sb.Append("project=").Append(_project.FullPath ?? "").Append('\n');
             sb.Append("target=").Append(_targetName).Append('\n');
             StrictCacheKeyEnvironment.AppendFingerprint(sb, _project.GetPropertyValue(StrictCacheKeyEnvironment.PropertyName));
+            AppendTargetStateFingerprint(sb);
 
             var sortedInputs = new List<string>(resolvedInputs);
             sortedInputs.Sort(StringComparer.Ordinal);
@@ -685,6 +692,412 @@ namespace Microsoft.Build.BackEnd
         private string NormalizeRel(string path)
         {
             return StrictPath.ToCacheRelativePath(_project.Directory, path);
+        }
+
+        private void AppendTargetStateFingerprint(StringBuilder builder)
+        {
+            if (!_project.Targets.TryGetValue(_targetName, out ProjectTargetInstance target))
+            {
+                return;
+            }
+
+            var propertyNames = new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
+            var metadataReferences = new HashSet<MetadataReference>(s_metadataReferenceComparer);
+
+            CollectTargetStateReferences(target, propertyNames, metadataReferences);
+            AddConfiguredPropertyNames(propertyNames, _project.GetPropertyValue(CacheKeyPropertiesPropertyName));
+            AddConfiguredMetadataReferences(metadataReferences, _project.GetPropertyValue(CacheKeyItemMetadataPropertyName));
+
+            if (propertyNames.Count > 0)
+            {
+                var sortedProperties = new List<string>(propertyNames);
+                sortedProperties.Sort(s_msbuildNameComparer);
+                foreach (string propertyName in sortedProperties)
+                {
+                    builder.Append("p:").Append(propertyName).Append('=').Append(_project.GetPropertyValue(propertyName)).Append('\n');
+                }
+            }
+
+            if (metadataReferences.Count == 0)
+            {
+                return;
+            }
+
+            var sortedMetadataReferences = new List<MetadataReference>(metadataReferences);
+            sortedMetadataReferences.Sort(s_metadataReferenceComparer);
+            foreach (MetadataReference metadataReference in sortedMetadataReferences)
+            {
+                AppendMetadataReferenceFingerprint(builder, metadataReference);
+            }
+        }
+
+        private void AppendMetadataReferenceFingerprint(StringBuilder builder, MetadataReference metadataReference)
+        {
+            builder.Append("mref:");
+            if (!string.IsNullOrEmpty(metadataReference.ItemType))
+            {
+                builder.Append(metadataReference.ItemType).Append('.');
+            }
+
+            builder.Append(metadataReference.MetadataName).Append('\n');
+
+            ICollection<ProjectItemInstance> items = string.IsNullOrEmpty(metadataReference.ItemType)
+                ? _project.Items
+                : _project.GetItems(metadataReference.ItemType);
+
+            foreach (ProjectItemInstance item in items)
+            {
+                builder.Append("m:").Append(item.ItemType).Append('|').Append(item.EvaluatedInclude).Append('|')
+                    .Append(metadataReference.MetadataName).Append('=')
+                    .Append(item.GetMetadataValue(metadataReference.MetadataName)).Append('\n');
+            }
+        }
+
+        private static void CollectTargetStateReferences(ProjectTargetInstance target, HashSet<string> propertyNames, HashSet<MetadataReference> metadataReferences)
+        {
+            CollectExpressionReferences(target.Condition, propertyNames, metadataReferences);
+            CollectExpressionReferences(target.Inputs, propertyNames, metadataReferences);
+            CollectExpressionReferences(target.Outputs, propertyNames, metadataReferences);
+
+            foreach (ProjectTargetInstanceChild child in target.Children)
+            {
+                switch (child)
+                {
+                    case ProjectTaskInstance task:
+                        CollectTaskReferences(task, propertyNames, metadataReferences);
+                        break;
+                    case ProjectPropertyGroupTaskInstance propertyGroup:
+                        CollectPropertyGroupReferences(propertyGroup, propertyNames, metadataReferences);
+                        break;
+                    case ProjectItemGroupTaskInstance itemGroup:
+                        CollectItemGroupReferences(itemGroup, propertyNames, metadataReferences);
+                        break;
+                    default:
+                        CollectExpressionReferences(child.Condition, propertyNames, metadataReferences);
+                        break;
+                }
+            }
+        }
+
+        private static void CollectTaskReferences(ProjectTaskInstance task, HashSet<string> propertyNames, HashSet<MetadataReference> metadataReferences)
+        {
+            CollectExpressionReferences(task.Condition, propertyNames, metadataReferences);
+            CollectExpressionReferences(task.ContinueOnError, propertyNames, metadataReferences);
+            CollectExpressionReferences(task.MSBuildRuntime, propertyNames, metadataReferences);
+            CollectExpressionReferences(task.MSBuildArchitecture, propertyNames, metadataReferences);
+
+            foreach (KeyValuePair<string, string> parameter in task.Parameters)
+            {
+                CollectExpressionReferences(parameter.Value, propertyNames, metadataReferences);
+            }
+
+            foreach (ProjectTaskInstanceChild output in task.Outputs)
+            {
+                CollectExpressionReferences(output.Condition, propertyNames, metadataReferences);
+            }
+        }
+
+        private static void CollectPropertyGroupReferences(ProjectPropertyGroupTaskInstance propertyGroup, HashSet<string> propertyNames, HashSet<MetadataReference> metadataReferences)
+        {
+            CollectExpressionReferences(propertyGroup.Condition, propertyNames, metadataReferences);
+            foreach (ProjectPropertyGroupTaskPropertyInstance property in propertyGroup.Properties)
+            {
+                CollectExpressionReferences(property.Condition, propertyNames, metadataReferences);
+                CollectExpressionReferences(property.Value, propertyNames, metadataReferences);
+            }
+        }
+
+        private static void CollectItemGroupReferences(ProjectItemGroupTaskInstance itemGroup, HashSet<string> propertyNames, HashSet<MetadataReference> metadataReferences)
+        {
+            CollectExpressionReferences(itemGroup.Condition, propertyNames, metadataReferences);
+            foreach (ProjectItemGroupTaskItemInstance item in itemGroup.Items)
+            {
+                CollectExpressionReferences(item.Condition, propertyNames, metadataReferences);
+                CollectExpressionReferences(item.Include, propertyNames, metadataReferences);
+                CollectExpressionReferences(item.Exclude, propertyNames, metadataReferences);
+                CollectExpressionReferences(item.Remove, propertyNames, metadataReferences);
+                CollectExpressionReferences(item.MatchOnMetadata, propertyNames, metadataReferences);
+                CollectExpressionReferences(item.MatchOnMetadataOptions, propertyNames, metadataReferences);
+                CollectExpressionReferences(item.KeepMetadata, propertyNames, metadataReferences);
+                CollectExpressionReferences(item.RemoveMetadata, propertyNames, metadataReferences);
+                CollectExpressionReferences(item.KeepDuplicates, propertyNames, metadataReferences);
+
+                foreach (ProjectItemGroupTaskMetadataInstance metadata in item.Metadata)
+                {
+                    CollectExpressionReferences(metadata.Condition, propertyNames, metadataReferences);
+                    CollectExpressionReferences(metadata.Value, propertyNames, metadataReferences);
+                }
+            }
+        }
+
+        private static void AddConfiguredPropertyNames(HashSet<string> propertyNames, string configuredValue)
+        {
+            foreach (string propertyName in SplitConfiguredList(configuredValue))
+            {
+                if (IsSimpleIdentifier(propertyName))
+                {
+                    propertyNames.Add(propertyName);
+                }
+            }
+        }
+
+        private static void AddConfiguredMetadataReferences(HashSet<MetadataReference> metadataReferences, string configuredValue)
+        {
+            foreach (string entry in SplitConfiguredList(configuredValue))
+            {
+                if (TryParseConfiguredMetadataReference(entry, out MetadataReference metadataReference))
+                {
+                    metadataReferences.Add(metadataReference);
+                }
+            }
+        }
+
+        private static IEnumerable<string> SplitConfiguredList(string configuredValue)
+        {
+            if (string.IsNullOrWhiteSpace(configuredValue))
+            {
+                yield break;
+            }
+
+            foreach (string entry in configuredValue.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string trimmed = entry.Trim();
+                if (trimmed.Length > 0)
+                {
+                    yield return trimmed;
+                }
+            }
+        }
+
+        private static bool TryParseConfiguredMetadataReference(string value, out MetadataReference metadataReference)
+        {
+            metadataReference = default;
+
+            int separatorIndex = value.IndexOf('.');
+            if (separatorIndex < 0)
+            {
+                if (!IsSimpleIdentifier(value))
+                {
+                    return false;
+                }
+
+                metadataReference = new MetadataReference(itemType: null, metadataName: value);
+                return true;
+            }
+
+            if (value.IndexOf('.', separatorIndex + 1) >= 0)
+            {
+                return false;
+            }
+
+            string itemType = value.Substring(0, separatorIndex).Trim();
+            string metadataName = value.Substring(separatorIndex + 1).Trim();
+            if (!IsSimpleIdentifier(itemType) || !IsSimpleIdentifier(metadataName))
+            {
+                return false;
+            }
+
+            metadataReference = new MetadataReference(itemType, metadataName);
+            return true;
+        }
+
+        private static void CollectExpressionReferences(string expression, HashSet<string> propertyNames, HashSet<MetadataReference> metadataReferences)
+        {
+            if (string.IsNullOrEmpty(expression))
+            {
+                return;
+            }
+
+            for (int i = 0; i < expression.Length - 1; i++)
+            {
+                if (expression[i + 1] != '(')
+                {
+                    continue;
+                }
+
+                switch (expression[i])
+                {
+                    case '$':
+                        if (TryParsePropertyReference(expression, i + 2, out string propertyName))
+                        {
+                            propertyNames.Add(propertyName);
+                        }
+                        break;
+                    case '%':
+                        if (TryParseMetadataReference(expression, i + 2, out MetadataReference metadataReference))
+                        {
+                            metadataReferences.Add(metadataReference);
+                        }
+                        break;
+                }
+            }
+        }
+
+        private static bool TryParsePropertyReference(string expression, int index, out string propertyName)
+        {
+            propertyName = null;
+            index = SkipWhitespace(expression, index);
+            if (index >= expression.Length || expression[index] == '[')
+            {
+                return false;
+            }
+
+            if (!TryReadIdentifier(expression, index, out string firstIdentifier, out int nextIndex))
+            {
+                return false;
+            }
+
+            nextIndex = SkipWhitespace(expression, nextIndex);
+            if (nextIndex >= expression.Length || expression[nextIndex] != ')')
+            {
+                return false;
+            }
+
+            propertyName = firstIdentifier;
+            return true;
+        }
+
+        private static bool TryParseMetadataReference(string expression, int index, out MetadataReference metadataReference)
+        {
+            metadataReference = default;
+            index = SkipWhitespace(expression, index);
+            if (index >= expression.Length)
+            {
+                return false;
+            }
+
+            int endIndex = expression.IndexOf(')', index);
+            if (endIndex < 0)
+            {
+                return false;
+            }
+
+            string content = expression.Substring(index, endIndex - index).Trim();
+            if (content.Length == 0)
+            {
+                return false;
+            }
+
+            int separatorIndex = content.IndexOf('.');
+            if (separatorIndex < 0)
+            {
+                if (!IsSimpleIdentifier(content))
+                {
+                    return false;
+                }
+
+                metadataReference = new MetadataReference(itemType: null, metadataName: content);
+                return true;
+            }
+
+            string itemType = content.Substring(0, separatorIndex).Trim();
+            string metadataName = content.Substring(separatorIndex + 1).Trim();
+            if (!IsSimpleIdentifier(itemType) || !IsSimpleIdentifier(metadataName))
+            {
+                return false;
+            }
+
+            metadataReference = new MetadataReference(itemType, metadataName);
+            return true;
+        }
+
+        private static int SkipWhitespace(string expression, int index)
+        {
+            while (index < expression.Length && char.IsWhiteSpace(expression[index]))
+            {
+                index++;
+            }
+
+            return index;
+        }
+
+        private static bool TryReadIdentifier(string expression, int index, out string identifier, out int nextIndex)
+        {
+            identifier = null;
+            nextIndex = index;
+            while (nextIndex < expression.Length && IsIdentifierChar(expression[nextIndex]))
+            {
+                nextIndex++;
+            }
+
+            if (nextIndex == index)
+            {
+                return false;
+            }
+
+            identifier = expression.Substring(index, nextIndex - index);
+            return true;
+        }
+
+        private static bool IsSimpleIdentifier(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            foreach (char c in value)
+            {
+                if (!IsIdentifierChar(c))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool IsIdentifierChar(char c)
+            => char.IsLetterOrDigit(c) || c is '_' or '-' or '.';
+
+        private readonly struct MetadataReference
+        {
+            internal MetadataReference(string itemType, string metadataName)
+            {
+                ItemType = itemType;
+                MetadataName = metadataName;
+            }
+
+            internal string ItemType { get; }
+
+            internal string MetadataName { get; }
+        }
+
+        private sealed class MetadataReferenceComparer : IComparer<MetadataReference>, IEqualityComparer<MetadataReference>
+        {
+            public int Compare(MetadataReference x, MetadataReference y)
+            {
+                int itemTypeComparison = CompareNames(x.ItemType, y.ItemType);
+                return itemTypeComparison != 0
+                    ? itemTypeComparison
+                    : CompareNames(x.MetadataName, y.MetadataName);
+            }
+
+            public bool Equals(MetadataReference x, MetadataReference y)
+                => Compare(x, y) == 0;
+
+            public int GetHashCode(MetadataReference obj)
+            {
+                int hash = 17;
+                hash = (hash * 31) + MSBuildNameIgnoreCaseComparer.Default.GetHashCode(obj.MetadataName);
+                hash = (hash * 31) + (obj.ItemType is null ? 0 : MSBuildNameIgnoreCaseComparer.Default.GetHashCode(obj.ItemType));
+                return hash;
+            }
+
+            private static int CompareNames(string left, string right)
+            {
+                if (left is null)
+                {
+                    return right is null ? 0 : -1;
+                }
+
+                if (right is null)
+                {
+                    return 1;
+                }
+
+                return StringComparer.OrdinalIgnoreCase.Compare(left, right);
+            }
         }
 
         private string GetCacheRoot()

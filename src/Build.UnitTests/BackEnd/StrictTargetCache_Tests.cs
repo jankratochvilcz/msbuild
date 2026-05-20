@@ -355,6 +355,67 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
         }
 
         [Fact]
+        public void E2E_Strict_TargetBodyPropertyReference_InvalidatesCache()
+        {
+            var (projectPath, _, outputPath) = WriteDemoProject(
+                strictMode: "warn",
+                writeUndeclared: false,
+                projectPropertyName: "ConsumedValue",
+                projectPropertyValue: "one",
+                useProjectPropertyInOutput: true);
+
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+            File.ReadAllText(outputPath).Trim().ShouldBe("one");
+
+            File.Delete(outputPath);
+            RewriteProject(projectPath, "<ConsumedValue>one</ConsumedValue>", "<ConsumedValue>two</ConsumedValue>");
+
+            MockLogger logger = BuildOnce(projectPath);
+            logger.AssertLogContains("INSIDE_TARGET_BODY");
+            File.ReadAllText(outputPath).Trim().ShouldBe("two");
+        }
+
+        [Fact]
+        public void E2E_Strict_ConfiguredPropertyHint_InvalidatesCache()
+        {
+            var (projectPath, _, outputPath) = WriteDemoProject(
+                strictMode: "warn",
+                writeUndeclared: false,
+                projectPropertyName: "HiddenValue",
+                projectPropertyValue: "one",
+                cacheKeyProperties: "HiddenValue");
+
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+
+            File.Delete(outputPath);
+            RewriteProject(projectPath, "<HiddenValue>one</HiddenValue>", "<HiddenValue>two</HiddenValue>");
+
+            MockLogger logger = BuildOnce(projectPath);
+            logger.AssertLogContains("INSIDE_TARGET_BODY");
+            File.ReadAllText(outputPath).Trim().ShouldBe("produced");
+        }
+
+        [Fact]
+        public void E2E_Strict_ConfiguredMetadataHint_InvalidatesCache()
+        {
+            var (projectPath, _, outputPath) = WriteDemoProject(
+                strictMode: "warn",
+                writeUndeclared: false,
+                itemMetadataName: "Flavor",
+                itemMetadataValue: "one",
+                cacheKeyItemMetadata: "Compile.Flavor");
+
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+
+            File.Delete(outputPath);
+            RewriteProject(projectPath, "<Flavor>one</Flavor>", "<Flavor>two</Flavor>");
+
+            MockLogger logger = BuildOnce(projectPath);
+            logger.AssertLogContains("INSIDE_TARGET_BODY");
+            File.ReadAllText(outputPath).Trim().ShouldBe("produced");
+        }
+
+        [Fact]
         public void E2E_NonListedEnvironmentVariableChange_DoesNotInvalidateCache()
         {
             const string envVarName = "STRICT_TARGET_CACHE_ENV_IGNORE";
@@ -413,7 +474,15 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             string exemptTargets = null,
             string cacheKeyEnvVars = null,
             string consumedEnvironmentVariable = null,
-            string inputSpec = null)
+            string inputSpec = null,
+            string cacheKeyProperties = null,
+            string cacheKeyItemMetadata = null,
+            string projectPropertyName = null,
+            string projectPropertyValue = null,
+            bool useProjectPropertyInOutput = false,
+            string itemMetadataName = null,
+            string itemMetadataValue = null,
+            bool useItemMetadataInOutput = false)
         {
             var folder = _env.CreateFolder().Path;
             string inputPath = Path.Combine(folder, "input.txt");
@@ -430,12 +499,32 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             string cacheKeyEnvVarsProp = cacheKeyEnvVars is null
                 ? string.Empty
                 : $"<StrictModeCacheKeyEnvVars>{cacheKeyEnvVars}</StrictModeCacheKeyEnvVars>";
+            string cacheKeyPropertiesProp = cacheKeyProperties is null
+                ? string.Empty
+                : $"<StrictModeCacheKeyProperties>{cacheKeyProperties}</StrictModeCacheKeyProperties>";
+            string cacheKeyItemMetadataProp = cacheKeyItemMetadata is null
+                ? string.Empty
+                : $"<StrictModeCacheKeyItemMetadata>{cacheKeyItemMetadata}</StrictModeCacheKeyItemMetadata>";
             string consumedEnvProp = consumedEnvironmentVariable is null
                 ? string.Empty
                 : $"<ConsumedEnvironmentValue>$([System.Environment]::GetEnvironmentVariable('{consumedEnvironmentVariable}'))</ConsumedEnvironmentValue>";
-            string outputLines = consumedEnvironmentVariable is null
-                ? "produced"
-                : "$(ConsumedEnvironmentValue)";
+            string projectProperty = projectPropertyName is null
+                ? string.Empty
+                : $"<{projectPropertyName}>{projectPropertyValue}</{projectPropertyName}>";
+            string itemGroup = itemMetadataName is null
+                ? string.Empty
+                : $@"<ItemGroup>
+    <Compile Include=""{inputPath}"">
+      <{itemMetadataName}>{itemMetadataValue}</{itemMetadataName}>
+    </Compile>
+  </ItemGroup>";
+            string outputLines = consumedEnvironmentVariable is not null
+                ? "$(ConsumedEnvironmentValue)"
+                : useProjectPropertyInOutput
+                    ? $"$({projectPropertyName})"
+                    : useItemMetadataInOutput
+                        ? $"%(Compile.{itemMetadataName})"
+                        : "produced";
             string normalizedInputSpec = inputSpec ?? inputPath;
 
             // The body writes the declared output unconditionally and, optionally, an undeclared file
@@ -451,8 +540,12 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
     {modeProp}
     {exemptProp}
     {cacheKeyEnvVarsProp}
+    {cacheKeyPropertiesProp}
+    {cacheKeyItemMetadataProp}
     {consumedEnvProp}
+    {projectProperty}
   </PropertyGroup>
+  {itemGroup}
   <Target Name=""DoWork"" Inputs=""{normalizedInputSpec}"" Outputs=""{outputPath}"">
     <MakeDir Directories=""obj"" />
     <Message Importance=""High"" Text=""INSIDE_TARGET_BODY"" />
@@ -464,6 +557,13 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             string projectPath = Path.Combine(folder, "demo.proj");
             File.WriteAllText(projectPath, content);
             return (projectPath, inputPath, outputPath);
+        }
+
+        private static void RewriteProject(string projectPath, string oldValue, string newValue)
+        {
+            string projectContents = File.ReadAllText(projectPath);
+            projectContents.Contains(oldValue, StringComparison.Ordinal).ShouldBeTrue();
+            File.WriteAllText(projectPath, projectContents.Replace(oldValue, newValue, StringComparison.Ordinal));
         }
 
         private MockLogger BuildOnce(string projectPath, bool expectSuccess = true)

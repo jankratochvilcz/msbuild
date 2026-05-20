@@ -128,6 +128,17 @@ Strict Mode also excludes a small set of known volatile variables even when they
 `MSBUILDSTRICT*` telemetry variables and `DOTNET_CLI_TELEMETRY_SESSIONID`. Environment variables that are not
 matched by `$(StrictModeCacheKeyEnvVars)` are assumed not to affect build outputs.
 
+## Target cache key fidelity for properties and item metadata
+
+`StrictTargetCache` now fingerprints simple `$(Property)` references that appear in a target's `Inputs`, `Outputs`, `Condition`, task parameters, and in-target `PropertyGroup` / `ItemGroup` bodies. The fingerprint records both the referenced names and the current evaluated values so changing `$(DefineConstants)` invalidates the target cache even when the declared file inputs are unchanged.
+
+This is still a heuristic, not full evaluator dependency tracking. If a target reads properties or item metadata indirectly (for example via custom task logic, batching patterns, dynamic indirection, or syntax the string scanner does not recognise), opt the dependency into the cache key explicitly with:
+
+- `$(StrictModeCacheKeyProperties)` — semicolon/comma-separated property names.
+- `$(StrictModeCacheKeyItemMetadata)` — semicolon/comma-separated metadata names, either unqualified (`Flavor`) or item-qualified (`Compile.Flavor`).
+
+These hint properties are unioned with the automatically-detected references on every build.
+
 ## Layers and on-disk layout
 
 Strict Mode is composed of three independent cache layers, each gated by `MSBUILDSTRICTMODE` and each owning its
@@ -262,6 +273,8 @@ per-layer/per-outcome reason-code counts for the events that were emitted by tha
 | `MSBuildStrictCacheMaxBytes`      | Per-project target-cache size budget; overridden by `MSBUILDSTRICTCACHEMAXBYTES` env var if both set. |
 | `StrictAllowedOutputDirs`         | Semicolon list of project-relative directories outside `obj\` where targets may write without tripping `MSBSTRICT001`. |
 | `StrictModeCacheKeyEnvVars`       | Semicolon list of env-var name patterns (with `*` wildcards) to include in every strict cache key. Default is set in `Microsoft.Common.props`. |
+| `StrictModeCacheKeyProperties`    | Semicolon/comma-separated property names to force into every target-cache key for the project, in addition to the references strict mode discovers automatically. |
+| `StrictModeCacheKeyItemMetadata`  | Semicolon/comma-separated metadata names to force into every target-cache key for the project. Entries may be unqualified (`Flavor`) or item-qualified (`Compile.Flavor`). |
 
 ### CLI
 
@@ -290,6 +303,7 @@ specific check that fired (`no-manifest`, `manifest-corrupt`, `manifest-mismatch
   extension list and so miss changes to e.g. `.tt`, `.proto`, `.cpp`, `.tsx` (#6).
 - **Manifests embed absolute paths.** Strict-mode manifests are not portable between machines / users / OneDrive
   syncs (#8).
+- **Target dependency discovery is heuristic.** `StrictTargetCache` fingerprints simple `$(Property)` references plus any names forced in via `$(StrictModeCacheKeyProperties)` / `$(StrictModeCacheKeyItemMetadata)`, but it does not yet consume the evaluator's full expression-dependency graph. Targets with more dynamic reads, especially item-metadata reads, still need manual hints (#7 follow-up).
 - **No first-class cache-miss diagnostics.** Reason strings are heterogeneous and there is no structured event
   (#15).
 - **No concurrency / restart / multi-node test coverage** beyond happy paths (#17).
