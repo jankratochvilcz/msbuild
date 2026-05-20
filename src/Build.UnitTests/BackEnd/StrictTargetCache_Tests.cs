@@ -299,6 +299,25 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
         }
 
         [Fact]
+        public void E2E_InputSpecVariationsReuseSameCacheEntry()
+        {
+            var (projectPath, _, outputPath) = WriteDemoProject(
+                strictMode: "warn",
+                writeUndeclared: false,
+                inputSpec: "input.txt");
+
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+            File.Delete(outputPath);
+
+            var rewrittenProject = File.ReadAllText(projectPath).Replace("Inputs=\"input.txt\"", "Inputs=\".\\input.txt\"", StringComparison.Ordinal);
+            File.WriteAllText(projectPath, rewrittenProject);
+
+            MockLogger logger = BuildOnce(projectPath);
+            logger.AssertLogDoesntContain("INSIDE_TARGET_BODY");
+            File.Exists(outputPath).ShouldBeTrue();
+        }
+
+        [Fact]
         public void E2E_DifferentCacheKeys_KeepIndependentObservedOutputs()
         {
             const string envVarName = "STRICT_TARGET_CACHE_OBS";
@@ -393,7 +412,8 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             bool writeUndeclared,
             string exemptTargets = null,
             string cacheKeyEnvVars = null,
-            string consumedEnvironmentVariable = null)
+            string consumedEnvironmentVariable = null,
+            string inputSpec = null)
         {
             var folder = _env.CreateFolder().Path;
             string inputPath = Path.Combine(folder, "input.txt");
@@ -416,6 +436,7 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             string outputLines = consumedEnvironmentVariable is null
                 ? "produced"
                 : "$(ConsumedEnvironmentValue)";
+            string normalizedInputSpec = inputSpec ?? inputPath;
 
             // The body writes the declared output unconditionally and, optionally, an undeclared file
             // in the same intermediate dir (which strict mode should observe via the obj/ snapshot).
@@ -432,7 +453,7 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
     {cacheKeyEnvVarsProp}
     {consumedEnvProp}
   </PropertyGroup>
-  <Target Name=""DoWork"" Inputs=""{inputPath}"" Outputs=""{outputPath}"">
+  <Target Name=""DoWork"" Inputs=""{normalizedInputSpec}"" Outputs=""{outputPath}"">
     <MakeDir Directories=""obj"" />
     <Message Importance=""High"" Text=""INSIDE_TARGET_BODY"" />
     <WriteLinesToFile File=""{outputPath}"" Lines=""{outputLines}"" Overwrite=""true"" />

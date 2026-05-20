@@ -1079,17 +1079,8 @@ namespace Microsoft.Build.Execution
             {
                 return string.Empty;
             }
-            string full = Path.GetFullPath(path);
-#if NET
-            if (OperatingSystem.IsWindows())
-            {
-                return full.ToLowerInvariant();
-            }
-            return full;
-#else
-            // net472 always Windows.
-            return full.ToLowerInvariant();
-#endif
+
+            return StrictPath.Canonicalize(path);
         }
 
         // ---------------------------------------------------------------------

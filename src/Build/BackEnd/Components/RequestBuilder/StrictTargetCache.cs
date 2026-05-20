@@ -152,7 +152,7 @@ namespace Microsoft.Build.BackEnd
                 var resolvedInputs = new List<string>(inputs.Count);
                 foreach (var i in inputs)
                 {
-                    string p = Path.Combine(_project.Directory, i);
+                    string p = StrictPath.CanonicalizeRelativeTo(_project.Directory, i);
                     if (!File.Exists(p))
                     {
                         Log(MessageImportance.Low, $"[strict] '{_targetName}': declared input '{p}' missing; bypassing cache.");
@@ -166,10 +166,10 @@ namespace Microsoft.Build.BackEnd
                 string cacheDir = Path.Combine(cacheRoot, key);
 
                 _declaredOutputs = new List<string>(outputs.Count);
-                _declaredOutputsSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                _declaredOutputsSet = new HashSet<string>(StrictPath.PathComparer);
                 foreach (var o in outputs)
                 {
-                    string abs = Path.GetFullPath(Path.Combine(_project.Directory, o));
+                    string abs = StrictPath.CanonicalizeRelativeTo(_project.Directory, o);
                     _declaredOutputs.Add(abs);
                     _declaredOutputsSet.Add(abs);
                 }
@@ -377,10 +377,10 @@ namespace Microsoft.Build.BackEnd
                         failClosedViolation = true;
                     }
 
-                    string projRel = Path.GetFullPath(_project.Directory);
+                    string projRel = StrictPath.Canonicalize(_project.Directory);
                     foreach (string u in allUndeclared)
                     {
-                        string display = u.StartsWith(projRel, StringComparison.OrdinalIgnoreCase)
+                        string display = u.StartsWith(projRel, StrictPath.PathComparison)
                             ? u.Substring(projRel.Length).TrimStart(Path.DirectorySeparatorChar, '/')
                             : u;
                         string msg = $"Target '{_targetName}' wrote '{display}' which is not declared in Outputs=. Strict mode requires every produced file to be declared.";
@@ -540,23 +540,23 @@ namespace Microsoft.Build.BackEnd
         // Process-wide hash cache: (fullPath -> InputHashRecord). Shared across targets and
         // projects so the same response file / ref assembly is hashed at most once per process.
         private static readonly ConcurrentDictionary<string, InputHashRecord> s_globalHashCache
-            = new(StringComparer.OrdinalIgnoreCase);
+            = new(StrictPath.PathComparer);
 
         // Sidecars whose contents have been loaded into s_globalHashCache.
         private static readonly ConcurrentDictionary<string, byte> s_loadedSidecars
-            = new(StringComparer.OrdinalIgnoreCase);
+            = new(StrictPath.PathComparer);
 
         // Sidecar paths with pending writes. Flushed at process exit and opportunistically.
         private static readonly ConcurrentDictionary<string, byte> s_dirtySidecars
-            = new(StringComparer.OrdinalIgnoreCase);
+            = new(StrictPath.PathComparer);
 
         // Per-sidecar lock for batched flushes.
         private static readonly ConcurrentDictionary<string, object> s_sidecarLocks
-            = new(StringComparer.OrdinalIgnoreCase);
+            = new(StrictPath.PathComparer);
 
         // Per-project cache container roots already checked for stale schema siblings.
         private static readonly ConcurrentDictionary<string, byte> s_schemaRootsMaintained
-            = new(StringComparer.OrdinalIgnoreCase);
+            = new(StrictPath.PathComparer);
 
         private static int s_exitHookInstalled;
 
@@ -589,7 +589,7 @@ namespace Microsoft.Build.BackEnd
             catch { return HashFile(path); }
             long ticks = fi.LastWriteTimeUtc.Ticks;
             long size = fi.Length;
-            string key = Path.GetFullPath(path);
+            string key = StrictPath.Canonicalize(path);
             if (s_globalHashCache.TryGetValue(key, out InputHashRecord rec) && rec.Ticks == ticks && rec.Size == size)
             {
                 return rec.Hash;
@@ -665,7 +665,7 @@ namespace Microsoft.Build.BackEnd
                 using var w = new StreamWriter(sidecarPath);
                 foreach (var kv in s_globalHashCache)
                 {
-                    if (!kv.Key.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
+                    if (!kv.Key.StartsWith(projectRoot, StrictPath.PathComparison))
                     {
                         continue;
                     }
@@ -684,13 +684,7 @@ namespace Microsoft.Build.BackEnd
 
         private string NormalizeRel(string path)
         {
-            string full = Path.GetFullPath(path);
-            string root = Path.GetFullPath(_project.Directory);
-            if (full.StartsWith(root, StringComparison.OrdinalIgnoreCase))
-            {
-                return full.Substring(root.Length).TrimStart('\\', '/').Replace('\\', '/');
-            }
-            return full.Replace('\\', '/');
+            return StrictPath.ToCacheRelativePath(_project.Directory, path);
         }
 
         private string GetCacheRoot()
@@ -869,8 +863,8 @@ namespace Microsoft.Build.BackEnd
         /// </summary>
         private List<string> BuildExtraObservationDirs()
         {
-            var dirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            string projDir = Path.GetFullPath(_project.Directory);
+            var dirs = new HashSet<string>(StrictPath.PathComparer);
+            string projDir = StrictPath.Canonicalize(_project.Directory);
             string cacheRoot = GetCacheRoot();
 
             if (Directory.Exists(projDir) && !IsUnderOrEqual(projDir, _intermediateRoot))
@@ -884,7 +878,7 @@ namespace Microsoft.Build.BackEnd
                 {
                     continue;
                 }
-                string full = Path.GetFullPath(parent);
+                string full = StrictPath.Canonicalize(parent);
                 if (IsUnderOrEqual(full, _intermediateRoot) || IsUnderOrEqual(full, cacheRoot))
                 {
                     continue;
@@ -925,9 +919,7 @@ namespace Microsoft.Build.BackEnd
                 {
                     continue;
                 }
-                string abs = Path.IsPathRooted(trimmed)
-                    ? Path.GetFullPath(trimmed)
-                    : Path.GetFullPath(Path.Combine(_project.Directory, trimmed));
+                string abs = StrictPath.CanonicalizeRelativeTo(_project.Directory, trimmed);
                 result.Add(abs);
             }
             return result;
@@ -941,11 +933,11 @@ namespace Microsoft.Build.BackEnd
             }
             string c = candidate.TrimEnd(Path.DirectorySeparatorChar, '/');
             string r = root.TrimEnd(Path.DirectorySeparatorChar, '/');
-            if (string.Equals(c, r, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(c, r, StrictPath.PathComparison))
             {
                 return true;
             }
-            return c.StartsWith(r + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+            return c.StartsWith(r + Path.DirectorySeparatorChar, StrictPath.PathComparison);
         }
 
         private static string GetProjectRootForSidecar(string sidecarPath)
@@ -1034,7 +1026,7 @@ namespace Microsoft.Build.BackEnd
         /// </summary>
         private static Dictionary<string, string> SnapshotFlat(IEnumerable<string> dirs)
         {
-            var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var dict = new Dictionary<string, string>(StrictPath.PathComparer);
             foreach (string d in dirs)
             {
                 if (string.IsNullOrEmpty(d) || !Directory.Exists(d))
@@ -1060,7 +1052,7 @@ namespace Microsoft.Build.BackEnd
                     try
                     {
                         var fi = new FileInfo(f);
-                        dict[Path.GetFullPath(f)] = fi.LastWriteTimeUtc.Ticks.ToString() + "|" + fi.Length.ToString();
+                        dict[StrictPath.Canonicalize(f)] = fi.LastWriteTimeUtc.Ticks.ToString() + "|" + fi.Length.ToString();
                     }
                     catch { }
                 }
