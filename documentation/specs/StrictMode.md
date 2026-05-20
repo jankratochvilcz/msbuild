@@ -256,6 +256,38 @@ best-effort sink: it must never break a build, and every exception inside `Stric
 on process exit each node appends `outcome="summary"` rows that aggregate both per-layer outcome counts and
 per-layer/per-outcome reason-code counts for the events that were emitted by that process.
 
+For interactive debugging without a JSONL sidecar, set `StrictModeDiagnostics=true` (for example via `/p:StrictModeDiagnostics=true`).
+When that property is on, strict mode emits high-importance `[strict-diagnostics]` messages that include the layer,
+outcome, stable `reason_code`, and any relevant project / target / cache-key context.
+
+Current `reason_code` values are:
+
+- `Disabled`
+- `NoProjectFile`
+- `NoManifest`
+- `ManifestCorrupt`
+- `ManifestMismatch`
+- `ForeignMachine`
+- `DependentNoManifest`
+- `DependentManifestCorrupt`
+- `DependentManifestMismatch`
+- `DependentForeignMachine`
+- `DependentCacheKeyMismatch`
+- `InputCountChanged`
+- `InputChanged`
+- `InputStatFailed`
+- `OutputMissingOrChanged`
+- `OutputStatFailed`
+- `SynthOutputMissing`
+- `MissingTargetResult`
+- `SkipTarget`
+- `NonCacheableTarget`
+- `ReplaceExistingProjectInstance`
+- `NonSuccess`
+- `ExceptionOrCircular`
+- `MissingOrFailedTarget`
+- `Exception`
+
 ## Configuration reference
 
 ### Environment variables
@@ -276,6 +308,7 @@ per-layer/per-outcome reason-code counts for the events that were emitted by tha
 | `MSBuildStrictMode`               | Per-project opt-in. Same value space as `MSBUILDSTRICTMODE`; the env var wins. Honoured by the target cache and the strict up-to-date checker. |
 | `MSBuildStrictExemptTargets`      | Semicolon list of target names to exclude from the target cache (no read, no write). Case-insensitive. |
 | `MSBuildStrictCacheMaxBytes`      | Per-project target-cache size budget; overridden by `MSBUILDSTRICTCACHEMAXBYTES` env var if both set. |
+| `StrictModeDiagnostics`           | Opt-in high-importance `[strict-diagnostics]` messages for strict-mode hit/miss/store decisions. Pass `/p:StrictModeDiagnostics=true` when debugging a single build invocation. |
 | `StrictAllowedOutputDirs`         | Semicolon list of project-relative directories outside `obj\` where targets may write without tripping `MSBSTRICT001`. |
 | `StrictModeCacheKeyEnvVars`       | Semicolon list of env-var name patterns (with `*` wildcards) to include in every strict cache key. Default is set in `Microsoft.Common.props`. |
 | `StrictModeCacheKeyProperties`    | Semicolon/comma-separated property names to force into every target-cache key for the project, in addition to the references strict mode discovers automatically. |
@@ -297,7 +330,8 @@ forward the project property via `-p:MSBuildStrictMode=warn`. Issue #12 tracks a
 
 When investigating a miss, set `MSBUILDSTRICTTELEMETRYFILE=<path>` and re-run; the `reason` field will name the
 specific check that fired (`no-manifest`, `manifest-corrupt`, `manifest-mismatch`, `output-missing-or-changed:<path>`,
-`exception:<type> <message>`).
+`exception:<type> <message>`). For interactive one-off debugging, `/p:StrictModeDiagnostics=true` prints the same
+stable `reason_code` buckets into the normal log stream.
 
 ## Known limitations
 

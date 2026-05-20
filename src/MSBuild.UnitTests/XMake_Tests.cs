@@ -3168,6 +3168,28 @@ EndGlobal
 #endif
 
         [Fact]
+        public void Strict_DiagnosticsOnFastSkipMiss_StillRunsBuild()
+        {
+            string projectContents = """
+                <Project>
+                  <Target Name="Build">
+                    <Message Text="BuiltTargetRan" Importance="High" />
+                  </Target>
+                </Project>
+                """;
+            Dictionary<string, string> environmentVars = new(StringComparer.OrdinalIgnoreCase)
+            {
+                ["MSBUILDSTRICTMODE"] = "warn",
+            };
+
+            string output = ExecuteMSBuildExeExpectSuccess(projectContents, envsToCreate: environmentVars, arguments: "/p:StrictModeDiagnostics=true");
+
+            output.ShouldContain("[strict-diagnostics]");
+            output.ShouldContain("outcome=\"miss\"");
+            output.ShouldContain("BuiltTargetRan");
+        }
+
+        [Fact]
         public void ThrowsWhenMaxCpuCountTooLargeForMultiThreadedAndForceAllTasksOutOfProc()
         {
             string projectContent = """

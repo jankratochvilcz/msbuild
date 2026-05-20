@@ -34,9 +34,12 @@ namespace Microsoft.Build.Strict
     {
         private const string EnvFile = "MSBUILDSTRICTTELEMETRYFILE";
         private const string EnvIter = "MSBUILDSTRICTTELEMETRYITER";
+        private const string DiagnosticsPrefix = "[strict-diagnostics]";
         private const string SummaryOutcome = "summary";
         private const string SummaryKindOutcome = "outcome";
         private const string SummaryKindReason = "reason";
+
+        internal const string DiagnosticsPropertyName = "StrictModeDiagnostics";
 
         internal enum ReasonCode
         {
@@ -46,6 +49,11 @@ namespace Microsoft.Build.Strict
             ManifestCorrupt,
             ManifestMismatch,
             ForeignMachine,
+            DependentNoManifest,
+            DependentManifestCorrupt,
+            DependentManifestMismatch,
+            DependentForeignMachine,
+            DependentCacheKeyMismatch,
             InputCountChanged,
             InputChanged,
             InputStatFailed,
@@ -92,6 +100,52 @@ namespace Microsoft.Build.Strict
                 s_iter = current;
             }
             return s_iter;
+        }
+
+        internal static bool IsDiagnosticsEnabled(string projectPropertyValue = null)
+        {
+            return ParseBooleanSetting(projectPropertyValue);
+        }
+
+        internal static string GetReasonCode(string reason)
+        {
+            return ClassifyReasonCode(reason)?.ToString();
+        }
+
+        internal static string FormatDiagnosticMessage(string layer, string outcome, string reason = null, string project = null, string target = null, string cacheKey = null)
+        {
+            var sb = new StringBuilder(256);
+            sb.Append(DiagnosticsPrefix);
+            AppendDiagnosticPart(sb, "layer", layer);
+            AppendDiagnosticPart(sb, "outcome", outcome);
+
+            string reasonCode = GetReasonCode(reason);
+            if (!string.IsNullOrEmpty(reasonCode))
+            {
+                AppendDiagnosticPart(sb, "reason_code", reasonCode);
+            }
+
+            if (!string.IsNullOrEmpty(reason))
+            {
+                AppendDiagnosticPart(sb, "reason", reason);
+            }
+
+            if (!string.IsNullOrEmpty(project))
+            {
+                AppendDiagnosticPart(sb, "project", project);
+            }
+
+            if (!string.IsNullOrEmpty(target))
+            {
+                AppendDiagnosticPart(sb, "target", target);
+            }
+
+            if (!string.IsNullOrEmpty(cacheKey))
+            {
+                AppendDiagnosticPart(sb, "cache_key", cacheKey);
+            }
+
+            return sb.ToString();
         }
 
         public static void Emit(
@@ -224,6 +278,20 @@ namespace Microsoft.Build.Strict
             }
         }
 
+        private static bool ParseBooleanSetting(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            string trimmed = value.Trim();
+            return string.Equals(trimmed, "1", StringComparison.Ordinal)
+                || string.Equals(trimmed, "true", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(trimmed, "on", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(trimmed, "yes", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static ReasonCode? ClassifyReasonCode(string reason)
         {
             if (string.IsNullOrEmpty(reason))
@@ -240,6 +308,11 @@ namespace Microsoft.Build.Strict
             if (string.Equals(reason, "replace-instance", StringComparison.Ordinal)) return ReasonCode.ReplaceExistingProjectInstance;
             if (string.Equals(reason, "non-success", StringComparison.Ordinal)) return ReasonCode.NonSuccess;
             if (string.Equals(reason, "exception-or-circular", StringComparison.Ordinal)) return ReasonCode.ExceptionOrCircular;
+            if (reason.StartsWith("dependent-no-manifest:", StringComparison.Ordinal)) return ReasonCode.DependentNoManifest;
+            if (reason.StartsWith("dependent-manifest-corrupt:", StringComparison.Ordinal)) return ReasonCode.DependentManifestCorrupt;
+            if (reason.StartsWith("dependent-manifest-mismatch:", StringComparison.Ordinal)) return ReasonCode.DependentManifestMismatch;
+            if (reason.StartsWith("dependent-foreign-machine:", StringComparison.Ordinal)) return ReasonCode.DependentForeignMachine;
+            if (reason.StartsWith("dependent-cachekey-mismatch:", StringComparison.Ordinal)) return ReasonCode.DependentCacheKeyMismatch;
             if (reason.StartsWith("skip-target:", StringComparison.Ordinal)) return ReasonCode.SkipTarget;
             if (reason.StartsWith("non-cacheable-target:", StringComparison.Ordinal)) return ReasonCode.NonCacheableTarget;
             if (reason.StartsWith("input-count-changed", StringComparison.Ordinal)) return ReasonCode.InputCountChanged;
@@ -294,6 +367,51 @@ namespace Microsoft.Build.Strict
             if (count.HasValue) { AppendComma(sb); sb.Append("\"count\":").Append(count.Value); }
             sb.Append("}\n");
             return sb.ToString();
+        }
+
+        private static void AppendDiagnosticPart(StringBuilder sb, string key, string value)
+        {
+            if (value is null)
+            {
+                return;
+            }
+
+            sb.Append(' ');
+            sb.Append(key);
+            sb.Append('=');
+            sb.Append('"');
+            for (int i = 0; i < value.Length; i++)
+            {
+                char c = value[i];
+                switch (c)
+                {
+                    case '"':
+                    case '\\':
+                        sb.Append('\\');
+                        sb.Append(c);
+                        break;
+                    case '\r':
+                        sb.Append("\\r");
+                        break;
+                    case '\n':
+                        sb.Append("\\n");
+                        break;
+                    case '\t':
+                        sb.Append("\\t");
+                        break;
+                    default:
+                        if (c < 0x20)
+                        {
+                            sb.Append(' ');
+                        }
+                        else
+                        {
+                            sb.Append(c);
+                        }
+                        break;
+                }
+            }
+            sb.Append('"');
         }
 
         private static void WriteLine(string file, string jsonLine)

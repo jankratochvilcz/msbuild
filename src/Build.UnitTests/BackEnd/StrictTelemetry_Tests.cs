@@ -96,5 +96,48 @@ namespace Microsoft.Build.UnitTests.BackEnd
             lines.ShouldContain(line => line.Contains("\"summary_kind\":\"outcome\"") && line.Contains("\"summary_outcome\":\"miss\"") && line.Contains("\"count\":2"));
             lines.ShouldContain(line => line.Contains("\"summary_kind\":\"reason\"") && line.Contains("\"summary_outcome\":\"miss\"") && line.Contains("\"reason_code\":\"NoManifest\"") && line.Contains("\"count\":2"));
         }
+
+        [Fact]
+        public void DiagnosticsSetting_UsesBooleanPropertyTruthTable()
+        {
+            StrictTelemetry.IsDiagnosticsEnabled(null).ShouldBeFalse();
+            StrictTelemetry.IsDiagnosticsEnabled("true").ShouldBeTrue();
+            StrictTelemetry.IsDiagnosticsEnabled("  yes  ").ShouldBeTrue();
+            StrictTelemetry.IsDiagnosticsEnabled("off").ShouldBeFalse();
+            StrictTelemetry.IsDiagnosticsEnabled("garbage").ShouldBeFalse();
+        }
+
+        [Fact]
+        public void FormatDiagnosticMessage_IncludesStableReasonCode()
+        {
+            string message = StrictTelemetry.FormatDiagnosticMessage(
+                layer: "project-fastskip",
+                outcome: "miss",
+                reason: "dependent-no-manifest:abc123",
+                project: "demo.csproj",
+                target: "Build",
+                cacheKey: "abcdef");
+
+            message.ShouldContain("[strict-diagnostics]");
+            message.ShouldContain("layer=\"project-fastskip\"");
+            message.ShouldContain("outcome=\"miss\"");
+            message.ShouldContain("reason_code=\"DependentNoManifest\"");
+            message.ShouldContain("reason=\"dependent-no-manifest:abc123\"");
+            message.ShouldContain("project=\"demo.csproj\"");
+            message.ShouldContain("target=\"Build\"");
+            message.ShouldContain("cache_key=\"abcdef\"");
+        }
+
+        [Fact]
+        public void FormatDiagnosticMessage_EscapesControlCharacters()
+        {
+            string message = StrictTelemetry.FormatDiagnosticMessage(
+                layer: "target-cache",
+                outcome: "error",
+                reason: "exception: IOException line1\r\nline2\tquoted\"text\"");
+
+            message.ShouldContain("reason=\"exception: IOException line1\\r\\nline2\\tquoted\\\"text\\\"\"");
+            message.ShouldNotContain("\r\nline2");
+        }
     }
 }

@@ -2097,21 +2097,57 @@ namespace Microsoft.Build.Execution
                     }
                 }
 
+                string? diagnosticsProperty = null;
+                if (globalProps is not null)
+                {
+                    globalProps.TryGetValue(Microsoft.Build.Strict.StrictTelemetry.DiagnosticsPropertyName, out diagnosticsProperty);
+                }
+                bool diagnosticsEnabled = Microsoft.Build.Strict.StrictTelemetry.IsDiagnosticsEnabled(diagnosticsProperty);
+                string? targetList = targetNames.Count > 0 ? string.Join(",", targetNames) : null;
+
                 StrictProjectCache.CachedBuild cached = StrictProjectCache.TryHit(
                     projectFullPath,
                     globalProps,
                     targetNames,
                     data.Flags,
                     out string cacheKey,
-                    out string _);
+                    out string cacheReason);
 
                 if (cached is null)
                 {
+                    if (diagnosticsEnabled)
+                    {
+                        ((IBuildComponentHost)this).LoggingService?.LogCommentFromText(
+                            BuildEventContext.Invalid,
+                            MessageImportance.High,
+                            Microsoft.Build.Strict.StrictTelemetry.FormatDiagnosticMessage(
+                                layer: "project-fastskip",
+                                outcome: "miss",
+                                reason: cacheReason,
+                                project: projectFullPath,
+                                target: targetList,
+                                cacheKey: cacheKey));
+                    }
+
                     if (!string.IsNullOrEmpty(cacheKey))
                     {
                         StrictProjectCache.RegisterMiss(submission.SubmissionId, projectFullPath, globalProps, targetNames, cacheKey);
                     }
                     return false;
+                }
+
+                if (diagnosticsEnabled)
+                {
+                    ((IBuildComponentHost)this).LoggingService?.LogCommentFromText(
+                        BuildEventContext.Invalid,
+                        MessageImportance.High,
+                        Microsoft.Build.Strict.StrictTelemetry.FormatDiagnosticMessage(
+                            layer: "project-fastskip",
+                            outcome: "hit",
+                            reason: cacheReason,
+                            project: projectFullPath,
+                            target: targetList,
+                            cacheKey: cacheKey));
                 }
 
                 // Hit: mirror the project-cache plugin hit path (see HandleCacheResult).

@@ -190,6 +190,7 @@ namespace Microsoft.Build.BackEnd
                     swHit.Stop();
                     Log(MessageImportance.High,
                         $"[strict] HIT  {_targetName}  key={key.Substring(0, 10)}  restored {restored} file(s)");
+                    LogDiagnosticMessage("hit", "hit", key);
                     if (StrictTelemetry.IsEnabled)
                     {
                         StrictTelemetry.Emit(
@@ -229,6 +230,7 @@ namespace Microsoft.Build.BackEnd
 
                 Log(MessageImportance.High,
                     $"[strict] MISS {_targetName}  key={key.Substring(0, 10)}");
+                LogDiagnosticMessage("miss", "no-manifest", key);
                 if (StrictTelemetry.IsEnabled)
                 {
                     StrictTelemetry.Emit(
@@ -245,6 +247,7 @@ namespace Microsoft.Build.BackEnd
             {
                 // Cache must never break a build. Log and fall back to normal execution.
                 Log(MessageImportance.Low, $"[strict] cache lookup failed for {_targetName}: {ex.Message}");
+                LogDiagnosticMessage("error", "exception: " + ex.GetType().Name + " " + ex.Message);
                 _cacheDir = null;
                 return false;
             }
@@ -412,6 +415,7 @@ namespace Microsoft.Build.BackEnd
                 File.WriteAllText(Path.Combine(_cacheDir, ".ok"), DateTime.UtcNow.ToString("O"));
                 Log(MessageImportance.High,
                     $"[strict] STORE {_targetName}  {stored} file(s) ({_declaredOutputs.Count} declared, {observed.Count} observed)");
+                LogDiagnosticMessage("store", null, null);
                 if (StrictTelemetry.IsEnabled)
                 {
                     StrictTelemetry.Emit(
@@ -433,6 +437,7 @@ namespace Microsoft.Build.BackEnd
                 }
 
                 Log(MessageImportance.Low, $"[strict] cache persist failed for {_targetName}: {ex.Message}");
+                LogDiagnosticMessage("store", "store-error: " + ex.GetType().Name, null);
             }
             finally
             {
@@ -1686,6 +1691,31 @@ namespace Microsoft.Build.BackEnd
             if (_log != null)
             {
                 _log.LogCommentFromText(_ctx, importance, message);
+            }
+        }
+
+        private void LogDiagnosticMessage(string outcome, string reason, string cacheKey = null)
+        {
+            try
+            {
+                if (!StrictTelemetry.IsDiagnosticsEnabled(_project.GetPropertyValue(StrictTelemetry.DiagnosticsPropertyName)))
+                {
+                    return;
+                }
+
+                Log(
+                    MessageImportance.High,
+                    StrictTelemetry.FormatDiagnosticMessage(
+                        layer: "target-cache",
+                        outcome: outcome,
+                        reason: reason,
+                        project: _project.FullPath,
+                        target: _targetName,
+                        cacheKey: cacheKey));
+            }
+            catch
+            {
+                // Diagnostics are best-effort only.
             }
         }
 

@@ -859,14 +859,45 @@ namespace Microsoft.Build.CommandLine
                             preBuildFastSkipInputs = Microsoft.Build.Strict.StrictSolutionFastSkip.CapturePreBuildInputSnapshot(projectFile);
                         }
 
+                        string strictDiagnosticsProperty = null;
+                        if (globalProperties is not null)
+                        {
+                            globalProperties.TryGetValue(Microsoft.Build.Strict.StrictTelemetry.DiagnosticsPropertyName, out strictDiagnosticsProperty);
+                        }
+                        bool strictDiagnosticsEnabled = Microsoft.Build.Strict.StrictTelemetry.IsDiagnosticsEnabled(strictDiagnosticsProperty);
+
                         if (Microsoft.Build.Strict.StrictSolutionFastSkip.TryFastSkip(projectFile, targets, globalProperties, out string fastSkipReason))
                         {
-                            Console.Out.WriteLine($"[strict] fast-skip HIT ({fastSkipReason}) — build skipped");
+                            if (strictDiagnosticsEnabled)
+                            {
+                                Console.Out.WriteLine(Microsoft.Build.Strict.StrictTelemetry.FormatDiagnosticMessage(
+                                    layer: "solution-fastskip",
+                                    outcome: "hit",
+                                    reason: fastSkipReason,
+                                    project: projectFile,
+                                    target: targets?.Length > 0 ? string.Join(",", targets) : null));
+                            }
+                            else
+                            {
+                                Console.Out.WriteLine($"[strict] fast-skip HIT ({fastSkipReason}) — build skipped");
+                            }
                             exitType = ExitType.Success;
                         }
-                        // if everything checks out, and sufficient information is available to start building
-                        else if (
-                            !BuildProject(
+                        else
+                        {
+                            if (strictDiagnosticsEnabled)
+                            {
+                                Console.Out.WriteLine(Microsoft.Build.Strict.StrictTelemetry.FormatDiagnosticMessage(
+                                    layer: "solution-fastskip",
+                                    outcome: "miss",
+                                    reason: fastSkipReason,
+                                    project: projectFile,
+                                    target: targets?.Length > 0 ? string.Join(",", targets) : null));
+                            }
+
+                            // if everything checks out, and sufficient information is available to start building
+                            if (
+                                !BuildProject(
                                 projectFile,
                                 targets,
                                 toolsVersion,
@@ -912,6 +943,7 @@ namespace Microsoft.Build.CommandLine
                         {
                             // Build succeeded — record manifest for next-invocation fast-skip.
                             Microsoft.Build.Strict.StrictSolutionFastSkip.RecordSuccess(projectFile, targets, globalProperties, preBuildFastSkipInputs);
+                        }
                         }
                     } // end of build
 
