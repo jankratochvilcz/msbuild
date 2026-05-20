@@ -249,6 +249,64 @@ namespace Microsoft.Build.UnitTests.Evaluation
         }
 
         /// <summary>
+        /// Customer-pattern guard: a chained <c>WithMetadataValue</c> sequence whose result feeds
+        /// <c>AnyHaveMetadataValue</c>, with the boolean-string output consumed by a
+        /// <c>Condition=</c>. Matches the shape dotnet/runtime's <c>eng/targetingpacks.targets</c>
+        /// uses to pick targeting packs:
+        /// <code>'@(Pack->WithMetadataValue('Identity','...')->WithMetadataValue('Labels','...')->AnyHaveMetadataValue('TargetFramework','...'))' != 'true'</code>
+        /// Pins down all three branches: a non-empty filter where the target metadata matches
+        /// (<c>true</c>), where it does not (<c>false</c>), and where the filter empties the set
+        /// (must still produce a single-item <c>false</c>, not empty).
+        ///
+        /// Relevant impl: <c>Expander.ItemTransformFunctions.WithMetadataValue</c> /
+        /// <c>AnyHaveMetadataValue</c> in <c>Expander.cs</c>; empty-list short-circuit special-case
+        /// for <c>AnyHaveMetadataValue</c> elsewhere in the same file.
+        /// </summary>
+        [Fact]
+        public void ExpandChainedWithMetadataValueFeedingAnyHaveMetadataValue()
+        {
+            ProjectInstance project = ProjectHelpers.CreateEmptyProjectInstance();
+            Expander<ProjectPropertyInstance, ProjectItemInstance> expander = CreateItemFunctionExpander();
+            ProjectItemInstanceFactory itemFactory = new ProjectItemInstanceFactory(project, "i");
+
+            // Items i0..i9: odd indexes carry Even='true'/Odd='false', even indexes carry the
+            // opposite. All items share Meta9 = Path.Combine("seconddirectory", "file.ext").
+            string meta9Value = Path.Combine("seconddirectory", "file.ext");
+
+            // Filter narrows to the odd-indexed items, all of which match Meta9 = meta9Value.
+            IList<ProjectItemInstance> itemsTrue = expander.ExpandIntoItemsLeaveEscaped(
+                $"@(i->WithMetadataValue('Even', 'true')->WithMetadataValue('Odd', 'false')->AnyHaveMetadataValue('Meta9', '{meta9Value}'))",
+                itemFactory,
+                ExpanderOptions.ExpandItems,
+                MockElementLocation.Instance);
+            ProjectItemInstance trueResult = itemsTrue.ShouldHaveSingleItem<ProjectItemInstance>();
+            trueResult.ItemType.ShouldBe("i");
+            trueResult.EvaluatedInclude.ShouldBe("true");
+
+            // Same filter, Meta9 value none of the surviving items have.
+            IList<ProjectItemInstance> itemsFalse = expander.ExpandIntoItemsLeaveEscaped(
+                "@(i->WithMetadataValue('Even', 'true')->WithMetadataValue('Odd', 'false')->AnyHaveMetadataValue('Meta9', 'no-such-value'))",
+                itemFactory,
+                ExpanderOptions.ExpandItems,
+                MockElementLocation.Instance);
+            ProjectItemInstance falseResult = itemsFalse.ShouldHaveSingleItem<ProjectItemInstance>();
+            falseResult.ItemType.ShouldBe("i");
+            falseResult.EvaluatedInclude.ShouldBe("false");
+
+            // Self-contradicting filter empties the intermediate set; AnyHaveMetadataValue over
+            // an empty set must still surface as a single-item 'false' so Condition= consumers
+            // can compare against the string literal.
+            IList<ProjectItemInstance> itemsEmpty = expander.ExpandIntoItemsLeaveEscaped(
+                $"@(i->WithMetadataValue('Even', 'true')->WithMetadataValue('Even', 'false')->AnyHaveMetadataValue('Meta9', '{meta9Value}'))",
+                itemFactory,
+                ExpanderOptions.ExpandItems,
+                MockElementLocation.Instance);
+            ProjectItemInstance emptyResult = itemsEmpty.ShouldHaveSingleItem<ProjectItemInstance>();
+            emptyResult.ItemType.ShouldBe("i");
+            emptyResult.EvaluatedInclude.ShouldBe("false");
+        }
+
+        /// <summary>
         /// Expand an item vector function Metadata()->DirectoryName()->Distinct()
         /// </summary>
         [Fact]
