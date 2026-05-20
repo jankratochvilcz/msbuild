@@ -1,0 +1,610 @@
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using System.IO;
+using Microsoft.Build.BackEnd;
+using Microsoft.Build.BackEnd.Logging;
+using Microsoft.Build.Evaluation;
+using Microsoft.Build.Execution;
+using Microsoft.Build.Framework;
+using Microsoft.Build.Shared;
+using Microsoft.Build.UnitTests;
+using Shouldly;
+using Xunit;
+
+#nullable disable
+
+namespace Microsoft.Build.Engine.UnitTests.BackEnd
+{
+    /// <summary>
+    /// Unit tests for the engine-side strict-mode target cache (<see cref="StrictTargetCache"/>).
+    /// These tests are kept tightly scoped to (a) the static mode/exempt parsers and (b) a small
+    /// end-to-end roundtrip that exercises the HIT/MISS persistence path through TargetEntry.
+    /// </summary>
+    public sealed class StrictTargetCache_Tests : IDisposable
+    {
+        private readonly ITestOutputHelper _output;
+        private readonly TestEnvironment _env;
+
+        public StrictTargetCache_Tests(ITestOutputHelper output)
+        {
+            _output = output;
+            _env = TestEnvironment.Create(_output);
+            // Make sure no inherited env var leaks into these tests.
+            _env.SetEnvironmentVariable("MSBUILDSTRICTMODE", null);
+            _env.SetEnvironmentVariable("MSBUILDSTRICTCACHEMAXBYTES", null);
+        }
+
+        public void Dispose() => _env.Dispose();
+
+        // ---------------------------------------------------------------------
+        // Static helpers: GetMode / IsTargetExempt
+        // ---------------------------------------------------------------------
+
+        [Fact]
+        public void GetMode_IsOff_WhenNeitherSet()
+        {
+            ProjectInstance proj = MakeInstance("<Project />");
+            StrictTargetCache.GetMode(proj).ToString().ShouldBe("Off");
+            StrictTargetCache.IsEnabled(proj).ShouldBeFalse();
+        }
+
+        [Theory]
+        [InlineData("true",    "Warn")]
+        [InlineData("1",       "Warn")]
+        [InlineData("warn",    "Warn")]
+        [InlineData("on",      "Warn")]
+        [InlineData("enforce", "Enforce")]
+        [InlineData("strict",  "Enforce")]
+        [InlineData("error",   "Enforce")]
+        [InlineData("nope",    "Off")]
+        [InlineData("",        "Off")]
+        public void GetMode_ParsesProjectProperty(string value, string expectedName)
+        {
+            ProjectInstance proj = MakeInstance(
+                $"<Project><PropertyGroup><MSBuildStrictMode>{value}</MSBuildStrictMode></PropertyGroup></Project>");
+            StrictTargetCache.GetMode(proj).ToString().ShouldBe(expectedName);
+        }
+
+        [Fact]
+        public void GetMode_EnvVarTakesPrecedenceOverProperty()
+        {
+            _env.SetEnvironmentVariable("MSBUILDSTRICTMODE", "enforce");
+
+            ProjectInstance proj = MakeInstance(
+                "<Project><PropertyGroup><MSBuildStrictMode>warn</MSBuildStrictMode></PropertyGroup></Project>");
+
+            StrictTargetCache.GetMode(proj).ToString().ShouldBe("Enforce");
+        }
+
+        [Fact]
+        public void GetMode_EnvVarReadPerCall_NotCached()
+        {
+            ProjectInstance proj = MakeInstance("<Project />");
+
+            _env.SetEnvironmentVariable("MSBUILDSTRICTMODE", "warn");
+            StrictTargetCache.GetMode(proj).ToString().ShouldBe("Warn");
+
+            _env.SetEnvironmentVariable("MSBUILDSTRICTMODE", null);
+            StrictTargetCache.GetMode(proj).ToString().ShouldBe("Off");
+
+            _env.SetEnvironmentVariable("MSBUILDSTRICTMODE", "enforce");
+            StrictTargetCache.GetMode(proj).ToString().ShouldBe("Enforce");
+        }
+
+        [Theory]
+        [InlineData("CoreCompile", "CoreCompile", true)]
+        [InlineData("CoreCompile;Pack", "Pack", true)]
+        [InlineData("Foo, Bar , Baz", "bar", true)] // commas and whitespace tolerated; case-insensitive
+        [InlineData("CoreCompile", "Build", false)]
+        [InlineData("", "CoreCompile", false)]
+        public void IsTargetExempt_HonorsList(string list, string target, bool expected)
+        {
+            ProjectInstance proj = MakeInstance(
+                $"<Project><PropertyGroup><MSBuildStrictExemptTargets>{list}</MSBuildStrictExemptTargets></PropertyGroup></Project>");
+            StrictTargetCache.IsTargetExempt(proj, target).ShouldBe(expected);
+        }
+
+        [Fact]
+        public void IsTargetExempt_NullInputs_ReturnsFalse()
+        {
+            StrictTargetCache.IsTargetExempt(null, "X").ShouldBeFalse();
+            ProjectInstance proj = MakeInstance("<Project />");
+            StrictTargetCache.IsTargetExempt(proj, null).ShouldBeFalse();
+            StrictTargetCache.IsTargetExempt(proj, "").ShouldBeFalse();
+        }
+
+        // ---------------------------------------------------------------------
+        // End-to-end: cache HIT, MISS, and disabled-by-default behavior
+        // ---------------------------------------------------------------------
+
+        /// <summary>
+        /// With strict mode ON: build a project whose only target declares Inputs/Outputs.
+        /// First build = MISS (target body runs). Second build = HIT (target skipped, body does not run).
+        /// </summary>
+        [Fact]
+        public void E2E_SecondBuild_HitsCache_AndSkipsTargetBody()
+        {
+            var (projectPath, inputPath, outputPath) = WriteDemoProject(strictMode: "warn", writeUndeclared: false);
+
+            // Build #1: cache miss, target runs, output produced.
+            MockLogger logger1 = BuildOnce(projectPath);
+            logger1.AssertLogContains("INSIDE_TARGET_BODY");
+            File.Exists(outputPath).ShouldBeTrue();
+
+            // Build #2: identical inputs -> cache hit -> target body NOT executed this build.
+            // Delete the output first so we can also assert it was *restored* from cache.
+            File.Delete(outputPath);
+            MockLogger logger2 = BuildOnce(projectPath);
+            logger2.AssertLogDoesntContain("INSIDE_TARGET_BODY");
+            File.Exists(outputPath).ShouldBeTrue("strict-mode cache HIT should restore declared outputs");
+        }
+
+        [Fact]
+        public void E2E_LegacyTargetCacheLayout_IsIgnored_AndStaleEntriesAreSwept()
+        {
+            var (projectPath, _, outputPath) = WriteDemoProject(strictMode: "warn", writeUndeclared: false);
+            string projectDir = Path.GetDirectoryName(projectPath);
+            string cacheContainerRoot = Path.Combine(projectDir, "obj", ".strict-cache");
+            string legacyEntryDir = Path.Combine(cacheContainerRoot, "DoWork", "legacy-key");
+            string legacyDeclDir = Path.Combine(legacyEntryDir, "out", "decl");
+            string legacyOkPath = Path.Combine(legacyEntryDir, ".ok");
+            string legacyPayloadPath = Path.Combine(legacyDeclDir, "0000_declared.out");
+            string legacySidecarPath = Path.Combine(cacheContainerRoot, "inputs.stamp");
+
+            Directory.CreateDirectory(legacyDeclDir);
+            File.WriteAllText(legacyOkPath, "legacy");
+            File.WriteAllText(legacyPayloadPath, "stale");
+            File.WriteAllText(legacySidecarPath, "old-sidecar");
+
+            DateTime staleWrite = DateTime.UtcNow.AddDays(-30);
+            SetTreeLastWriteTimeUtc(Path.Combine(cacheContainerRoot, "DoWork"), staleWrite);
+            File.SetLastWriteTimeUtc(legacySidecarPath, staleWrite);
+
+            MockLogger logger = BuildOnce(projectPath);
+            logger.AssertLogContains("INSIDE_TARGET_BODY");
+            File.ReadAllText(outputPath).Trim().ShouldBe("produced");
+
+            Directory.Exists(legacyEntryDir).ShouldBeFalse();
+            File.Exists(legacySidecarPath).ShouldBeFalse();
+
+            string versionedRoot = Path.Combine(cacheContainerRoot, "v1", "DoWork");
+            Directory.Exists(versionedRoot).ShouldBeTrue();
+            Directory.GetFiles(versionedRoot, ".ok", SearchOption.AllDirectories).Length.ShouldBeGreaterThan(0);
+
+            static void SetTreeLastWriteTimeUtc(string root, DateTime value)
+            {
+                foreach (string file in Directory.GetFiles(root, "*", SearchOption.AllDirectories))
+                {
+                    File.SetLastWriteTimeUtc(file, value);
+                }
+
+                foreach (string dir in Directory.GetDirectories(root, "*", SearchOption.AllDirectories))
+                {
+                    Directory.SetLastWriteTimeUtc(dir, value);
+                }
+
+                Directory.SetLastWriteTimeUtc(root, value);
+            }
+        }
+
+        /// <summary>
+        /// With strict mode OFF (default), the strict cache must NOT engage:
+        /// the target body must run on every build regardless of input changes.
+        /// </summary>
+        [Fact]
+        public void E2E_StrictModeOff_IsNoop()
+        {
+            var (projectPath, _, outputPath) = WriteDemoProject(strictMode: null, writeUndeclared: false);
+
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+            File.Delete(outputPath);
+            // Without strict mode the second build also runs the body (because we deleted the output, the
+            // built-in timestamp check correctly schedules it). Even if not, the body would still run
+            // because strict-mode caching is off. Either way: no INSIDE_TARGET_BODY suppression.
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+        }
+
+        /// <summary>
+        /// Enforce mode: a target that writes a file it did NOT declare in Outputs must FAIL the build
+        /// with MSBSTRICT001.
+        /// </summary>
+        [Fact]
+        public void E2E_EnforceMode_UndeclaredWrite_FailsTheBuild()
+        {
+            var (projectPath, _, _) = WriteDemoProject(strictMode: "enforce", writeUndeclared: true);
+
+            MockLogger logger = BuildOnce(projectPath, expectSuccess: false);
+            logger.AssertLogContains("MSBSTRICT001");
+        }
+
+        /// <summary>
+        /// Warn mode: same project as above (undeclared write) must still succeed but log a warning
+        /// mentioning MSBSTRICT001.
+        /// </summary>
+        [Fact]
+        public void E2E_WarnMode_UndeclaredWrite_WarnsButSucceeds()
+        {
+            var (projectPath, _, _) = WriteDemoProject(strictMode: "warn", writeUndeclared: true);
+
+            MockLogger logger = BuildOnce(projectPath, expectSuccess: true);
+            logger.AssertLogContains("MSBSTRICT001");
+        }
+
+        [Fact]
+        public void PersistOnSuccess_EnforceViolationRemainsLatched_WhenLoggingFallbackThrows()
+        {
+            var (projectPath, inputPath, outputPath) = WriteDemoProject(strictMode: "enforce", writeUndeclared: false);
+            string projectDir = Path.GetDirectoryName(projectPath);
+            string undeclaredPath = Path.Combine(projectDir, "obj", "undeclared.out");
+            string cacheRoot = Path.Combine(projectDir, "obj", ".strict-cache");
+            ProjectInstance project = new Project(projectPath).CreateProjectInstance();
+            var cache = new StrictTargetCache(project, "DoWork", new ThrowOnFirstStrictViolationLogsLoggingService(), new BuildEventContext(1, 2, 3, 4));
+
+            cache.TryRestore(new[] { inputPath }, new[] { @"obj\declared.out" }).ShouldBeFalse();
+            cache.HasPendingPersist.ShouldBeTrue();
+
+            Directory.CreateDirectory(Path.GetDirectoryName(outputPath));
+            File.WriteAllText(outputPath, "produced");
+            File.WriteAllText(undeclaredPath, "violation");
+
+            Should.NotThrow(() => cache.PersistOnSuccess());
+            cache.HasViolation.ShouldBeTrue();
+            cache.HasPendingPersist.ShouldBeFalse();
+            if (Directory.Exists(cacheRoot))
+            {
+                Directory.GetFiles(cacheRoot, ".ok", SearchOption.AllDirectories).ShouldBeEmpty();
+            }
+        }
+
+        /// <summary>
+        /// An exempted target must behave exactly as if strict mode were off for that target:
+        /// the strict cache does not engage, so the body runs on every build.
+        /// </summary>
+        [Fact]
+        public void E2E_ExemptTarget_BypassesStrictCache()
+        {
+            var (projectPath, _, outputPath) = WriteDemoProject(
+                strictMode: "warn",
+                writeUndeclared: false,
+                exemptTargets: "DoWork");
+
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+            File.Delete(outputPath);
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+        }
+
+        [Fact]
+        public void E2E_AllowListedEnvironmentVariableChange_InvalidatesCache()
+        {
+            const string envVarName = "STRICT_TARGET_CACHE_ENV";
+            _env.SetEnvironmentVariable(envVarName, "one");
+
+            var (projectPath, _, outputPath) = WriteDemoProject(
+                strictMode: "warn",
+                writeUndeclared: false,
+                cacheKeyEnvVars: envVarName,
+                consumedEnvironmentVariable: envVarName);
+
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+            File.ReadAllText(outputPath).Trim().ShouldBe("one");
+
+            File.Delete(outputPath);
+            _env.SetEnvironmentVariable(envVarName, "two");
+
+            MockLogger logger = BuildOnce(projectPath);
+            logger.AssertLogContains("INSIDE_TARGET_BODY");
+            File.ReadAllText(outputPath).Trim().ShouldBe("two");
+        }
+
+        [Fact]
+        public void E2E_InputSpecVariationsReuseSameCacheEntry()
+        {
+            var (projectPath, _, outputPath) = WriteDemoProject(
+                strictMode: "warn",
+                writeUndeclared: false,
+                inputSpec: "input.txt");
+
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+            File.Delete(outputPath);
+
+            var rewrittenProject = File.ReadAllText(projectPath).Replace("Inputs=\"input.txt\"", "Inputs=\".\\input.txt\"", StringComparison.Ordinal);
+            File.WriteAllText(projectPath, rewrittenProject);
+
+            MockLogger logger = BuildOnce(projectPath);
+            logger.AssertLogDoesntContain("INSIDE_TARGET_BODY");
+            File.Exists(outputPath).ShouldBeTrue();
+        }
+
+        [Fact]
+        public void E2E_DifferentCacheKeys_KeepIndependentObservedOutputs()
+        {
+            const string envVarName = "STRICT_TARGET_CACHE_OBS";
+            _env.SetEnvironmentVariable(envVarName, "one");
+
+            var (projectPath, _, outputPath) = WriteDemoProject(
+                strictMode: "warn",
+                writeUndeclared: true,
+                cacheKeyEnvVars: envVarName,
+                consumedEnvironmentVariable: envVarName);
+            string undeclaredPath = Path.Combine(Path.GetDirectoryName(projectPath), "obj", "undeclared.out");
+
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+            File.ReadAllText(undeclaredPath).Trim().ShouldBe("one");
+
+            _env.SetEnvironmentVariable(envVarName, "two");
+            File.Delete(outputPath);
+            File.Delete(undeclaredPath);
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+            File.ReadAllText(undeclaredPath).Trim().ShouldBe("two");
+
+            _env.SetEnvironmentVariable(envVarName, "one");
+            File.Delete(outputPath);
+            File.Delete(undeclaredPath);
+            MockLogger logger1 = BuildOnce(projectPath);
+            logger1.AssertLogDoesntContain("INSIDE_TARGET_BODY");
+            File.ReadAllText(undeclaredPath).Trim().ShouldBe("one");
+
+            _env.SetEnvironmentVariable(envVarName, "two");
+            File.Delete(outputPath);
+            File.Delete(undeclaredPath);
+            MockLogger logger2 = BuildOnce(projectPath);
+            logger2.AssertLogDoesntContain("INSIDE_TARGET_BODY");
+            File.ReadAllText(undeclaredPath).Trim().ShouldBe("two");
+        }
+
+        [Fact]
+        public void E2E_Strict_TargetBodyPropertyReference_InvalidatesCache()
+        {
+            var (projectPath, _, outputPath) = WriteDemoProject(
+                strictMode: "warn",
+                writeUndeclared: false,
+                projectPropertyName: "ConsumedValue",
+                projectPropertyValue: "one",
+                useProjectPropertyInOutput: true);
+
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+            File.ReadAllText(outputPath).Trim().ShouldBe("one");
+
+            File.Delete(outputPath);
+            RewriteProject(projectPath, "<ConsumedValue>one</ConsumedValue>", "<ConsumedValue>two</ConsumedValue>");
+
+            MockLogger logger = BuildOnce(projectPath);
+            logger.AssertLogContains("INSIDE_TARGET_BODY");
+            File.ReadAllText(outputPath).Trim().ShouldBe("two");
+        }
+
+        [Fact]
+        public void E2E_Strict_ConfiguredPropertyHint_InvalidatesCache()
+        {
+            var (projectPath, _, outputPath) = WriteDemoProject(
+                strictMode: "warn",
+                writeUndeclared: false,
+                projectPropertyName: "HiddenValue",
+                projectPropertyValue: "one",
+                cacheKeyProperties: "HiddenValue");
+
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+
+            File.Delete(outputPath);
+            RewriteProject(projectPath, "<HiddenValue>one</HiddenValue>", "<HiddenValue>two</HiddenValue>");
+
+            MockLogger logger = BuildOnce(projectPath);
+            logger.AssertLogContains("INSIDE_TARGET_BODY");
+            File.ReadAllText(outputPath).Trim().ShouldBe("produced");
+        }
+
+        [Fact]
+        public void E2E_Strict_ConfiguredMetadataHint_InvalidatesCache()
+        {
+            var (projectPath, _, outputPath) = WriteDemoProject(
+                strictMode: "warn",
+                writeUndeclared: false,
+                itemMetadataName: "Flavor",
+                itemMetadataValue: "one",
+                cacheKeyItemMetadata: "Compile.Flavor");
+
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+
+            File.Delete(outputPath);
+            RewriteProject(projectPath, "<Flavor>one</Flavor>", "<Flavor>two</Flavor>");
+
+            MockLogger logger = BuildOnce(projectPath);
+            logger.AssertLogContains("INSIDE_TARGET_BODY");
+            File.ReadAllText(outputPath).Trim().ShouldBe("produced");
+        }
+
+        [Fact]
+        public void E2E_NonListedEnvironmentVariableChange_DoesNotInvalidateCache()
+        {
+            const string envVarName = "STRICT_TARGET_CACHE_ENV_IGNORE";
+            _env.SetEnvironmentVariable(envVarName, "one");
+
+            var (projectPath, _, outputPath) = WriteDemoProject(strictMode: "warn", writeUndeclared: false);
+
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+
+            File.Delete(outputPath);
+            _env.SetEnvironmentVariable(envVarName, "two");
+
+            MockLogger logger = BuildOnce(projectPath);
+            logger.AssertLogDoesntContain("INSIDE_TARGET_BODY");
+            File.Exists(outputPath).ShouldBeTrue();
+        }
+
+        [Fact]
+        public void E2E_VolatileAllowListedEnvironmentVariableChange_DoesNotInvalidateCache()
+        {
+            const string envVarName = "DOTNET_CLI_TELEMETRY_SESSIONID";
+            _env.SetEnvironmentVariable(envVarName, "one");
+
+            var (projectPath, _, outputPath) = WriteDemoProject(
+                strictMode: "warn",
+                writeUndeclared: false,
+                cacheKeyEnvVars: "DOTNET_*",
+                consumedEnvironmentVariable: "DOTNET_ROOT");
+
+            BuildOnce(projectPath).AssertLogContains("INSIDE_TARGET_BODY");
+            File.ReadAllText(outputPath).Trim().ShouldBe(Environment.GetEnvironmentVariable("DOTNET_ROOT") ?? string.Empty);
+
+            File.Delete(outputPath);
+            _env.SetEnvironmentVariable(envVarName, "two");
+
+            MockLogger logger = BuildOnce(projectPath);
+            logger.AssertLogDoesntContain("INSIDE_TARGET_BODY");
+            File.Exists(outputPath).ShouldBeTrue();
+            File.ReadAllText(outputPath).Trim().ShouldBe(Environment.GetEnvironmentVariable("DOTNET_ROOT") ?? string.Empty);
+        }
+
+        // ---------------------------------------------------------------------
+        // Helpers
+        // ---------------------------------------------------------------------
+
+        private ProjectInstance MakeInstance(string xml)
+        {
+            using var stringReader = new StringReader(xml);
+            using var xmlReader = System.Xml.XmlReader.Create(stringReader);
+            return new ProjectInstance(Microsoft.Build.Construction.ProjectRootElement.Create(xmlReader));
+        }
+
+        private (string projectPath, string inputPath, string outputPath) WriteDemoProject(
+            string strictMode,
+            bool writeUndeclared,
+            string exemptTargets = null,
+            string cacheKeyEnvVars = null,
+            string consumedEnvironmentVariable = null,
+            string inputSpec = null,
+            string cacheKeyProperties = null,
+            string cacheKeyItemMetadata = null,
+            string projectPropertyName = null,
+            string projectPropertyValue = null,
+            bool useProjectPropertyInOutput = false,
+            string itemMetadataName = null,
+            string itemMetadataValue = null,
+            bool useItemMetadataInOutput = false)
+        {
+            var folder = _env.CreateFolder().Path;
+            string inputPath = Path.Combine(folder, "input.txt");
+            string outputPath = Path.Combine(folder, "obj", "declared.out");
+            string undeclaredPath = Path.Combine(folder, "obj", "undeclared.out");
+            File.WriteAllText(inputPath, "hello-strict-mode");
+
+            string modeProp = strictMode is null
+                ? string.Empty
+                : $"<MSBuildStrictMode>{strictMode}</MSBuildStrictMode>";
+            string exemptProp = exemptTargets is null
+                ? string.Empty
+                : $"<MSBuildStrictExemptTargets>{exemptTargets}</MSBuildStrictExemptTargets>";
+            string cacheKeyEnvVarsProp = cacheKeyEnvVars is null
+                ? string.Empty
+                : $"<StrictModeCacheKeyEnvVars>{cacheKeyEnvVars}</StrictModeCacheKeyEnvVars>";
+            string cacheKeyPropertiesProp = cacheKeyProperties is null
+                ? string.Empty
+                : $"<StrictModeCacheKeyProperties>{cacheKeyProperties}</StrictModeCacheKeyProperties>";
+            string cacheKeyItemMetadataProp = cacheKeyItemMetadata is null
+                ? string.Empty
+                : $"<StrictModeCacheKeyItemMetadata>{cacheKeyItemMetadata}</StrictModeCacheKeyItemMetadata>";
+            string consumedEnvProp = consumedEnvironmentVariable is null
+                ? string.Empty
+                : $"<ConsumedEnvironmentValue>$([System.Environment]::GetEnvironmentVariable('{consumedEnvironmentVariable}'))</ConsumedEnvironmentValue>";
+            string projectProperty = projectPropertyName is null
+                ? string.Empty
+                : $"<{projectPropertyName}>{projectPropertyValue}</{projectPropertyName}>";
+            string itemGroup = itemMetadataName is null
+                ? string.Empty
+                : $@"<ItemGroup>
+    <Compile Include=""{inputPath}"">
+      <{itemMetadataName}>{itemMetadataValue}</{itemMetadataName}>
+    </Compile>
+  </ItemGroup>";
+            string outputLines = consumedEnvironmentVariable is not null
+                ? "$(ConsumedEnvironmentValue)"
+                : useProjectPropertyInOutput
+                    ? $"$({projectPropertyName})"
+                    : useItemMetadataInOutput
+                        ? $"%(Compile.{itemMetadataName})"
+                        : "produced";
+            string normalizedInputSpec = inputSpec ?? inputPath;
+
+            // The body writes the declared output unconditionally and, optionally, an undeclared file
+            // in the same intermediate dir (which strict mode should observe via the obj/ snapshot).
+            string extraWrite = writeUndeclared
+                ? $@"<WriteLinesToFile File=""{undeclaredPath}"" Lines=""{outputLines}"" Overwrite=""true"" />"
+                : string.Empty;
+
+            string content = $@"<Project DefaultTargets=""DoWork"">
+  <PropertyGroup>
+    <BaseIntermediateOutputPath>obj\</BaseIntermediateOutputPath>
+    <IntermediateOutputPath>obj\</IntermediateOutputPath>
+    {modeProp}
+    {exemptProp}
+    {cacheKeyEnvVarsProp}
+    {cacheKeyPropertiesProp}
+    {cacheKeyItemMetadataProp}
+    {consumedEnvProp}
+    {projectProperty}
+  </PropertyGroup>
+  {itemGroup}
+  <Target Name=""DoWork"" Inputs=""{normalizedInputSpec}"" Outputs=""{outputPath}"">
+    <MakeDir Directories=""obj"" />
+    <Message Importance=""High"" Text=""INSIDE_TARGET_BODY"" />
+    <WriteLinesToFile File=""{outputPath}"" Lines=""{outputLines}"" Overwrite=""true"" />
+    {extraWrite}
+  </Target>
+</Project>";
+
+            string projectPath = Path.Combine(folder, "demo.proj");
+            File.WriteAllText(projectPath, content);
+            return (projectPath, inputPath, outputPath);
+        }
+
+        private static void RewriteProject(string projectPath, string oldValue, string newValue)
+        {
+            string projectContents = File.ReadAllText(projectPath);
+            projectContents.Contains(oldValue, StringComparison.Ordinal).ShouldBeTrue();
+            File.WriteAllText(projectPath, projectContents.Replace(oldValue, newValue, StringComparison.Ordinal));
+        }
+
+        private MockLogger BuildOnce(string projectPath, bool expectSuccess = true)
+        {
+            using var session = new Helpers.BuildManagerSession(_env);
+            BuildResult result = session.BuildProjectFile(projectPath);
+            if (expectSuccess)
+            {
+                result.OverallResult.ShouldBe(BuildResultCode.Success);
+            }
+            else
+            {
+                result.OverallResult.ShouldBe(BuildResultCode.Failure);
+            }
+            return session.Logger;
+        }
+
+        private sealed class ThrowOnFirstStrictViolationLogsLoggingService : Microsoft.Build.UnitTests.BackEnd.MockLoggingService, ILoggingService
+        {
+            private int _remainingThrows = 2;
+
+            void ILoggingService.LogErrorFromText(BuildEventContext buildEventContext, string subcategoryResourceName, string errorCode, string helpKeyword, BuildEventFileInfo file, string message)
+            {
+                ThrowOrForward(errorCode == "MSBSTRICT001", () => base.LogErrorFromText(buildEventContext, subcategoryResourceName, errorCode, helpKeyword, file, message));
+            }
+
+            void ILoggingService.LogCommentFromText(BuildEventContext buildEventContext, MessageImportance importance, string message)
+            {
+                ThrowOrForward(message?.Contains("MSBSTRICT001", StringComparison.Ordinal) == true, () => base.LogCommentFromText(buildEventContext, importance, message));
+            }
+
+            private void ThrowOrForward(bool shouldThrow, Action forward)
+            {
+                if (shouldThrow && _remainingThrows > 0)
+                {
+                    _remainingThrows--;
+                    throw new InvalidOperationException("Injected logging failure.");
+                }
+
+                forward();
+            }
+        }
+    }
+}

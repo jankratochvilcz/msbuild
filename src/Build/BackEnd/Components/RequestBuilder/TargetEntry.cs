@@ -554,6 +554,20 @@ namespace Microsoft.Build.BackEnd
                                 entryForExecution.LeaveScope();
                                 entryForExecution = null;
                                 targetSuccess = bucketResult.ResultCode == WorkUnitResultCode.Success;
+
+                                // If strict mode recorded a cache miss for this target, persist outputs now
+                                // so future builds with the same input content hashes can skip the work entirely.
+                                if (targetSuccess && dependencyResult != DependencyAnalysisResult.SkipUpToDate)
+                                {
+                                    dependencyAnalyzer.PersistStrictCacheOnSuccess();
+                                    if (dependencyAnalyzer.HasStrictViolation)
+                                    {
+                                        // Enforce mode: undeclared writes have already been logged as errors;
+                                        // mark target as failed so the build stops.
+                                        targetSuccess = false;
+                                        aggregateResult = aggregateResult.AggregateResult(new WorkUnitResult(WorkUnitResultCode.Failed, WorkUnitActionCode.Stop, null));
+                                    }
+                                }
                                 break;
 
                             case DependencyAnalysisResult.SkipNoInputs:

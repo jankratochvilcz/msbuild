@@ -439,6 +439,15 @@ namespace Microsoft.Build.BackEnd
                 SchedulableRequest request = _schedulingData.GetExecutingRequest(result.GlobalRequestId);
                 request.Complete(result);
 
+                // Tier-3 strict-mode project fast-skip: persist a per-project manifest so the
+                // next invocation can short-circuit even when this BuildResult belongs to a
+                // child (ProjectReference) request. The top-level BuildManager hook only fires
+                // for the root submission; without this hook we would miss all 45+ child
+                // projects in a typical solution. Skipped if the result was itself synthesised
+                // from the strict cache or if the request is a root request (already covered
+                // by BuildManager.MaybeStoreOnCompletion).
+                TryStrictProjectCachePersistChild(request.BuildRequest, result);
+
                 // Report results to our parent, or report submission complete as necessary.
                 if (request.Parent != null)
                 {
@@ -1775,6 +1784,18 @@ namespace Microsoft.Build.BackEnd
                 // directly here.  We COULD simply report these as blocking the parent request and let the scheduler pick them up later when the parent
                 // comes back up as schedulable, but we prefer to send the results back immediately so this request can (potentially) continue uninterrupted.
                 ScheduleResponse response = TrySatisfyRequestFromCache(nodeForResults, request, skippedResultsDoNotCauseCacheMiss: _componentHost.BuildParameters.SkippedResultsDoNotCauseCacheMiss());
+
+                // Tier-3 strict-mode project fast-skip: if there is no in-build cache hit, consult
+                // the on-disk per-project manifest. On a hit, synthesise a BuildResult and feed it
+                // back without ever loading the project XML, running the project-reference protocol,
+                // or scheduling the request to a worker node. This is the inner hook that mirrors
+                // BuildManager.TryStrictProjectCacheFastSkip but fires for every ProjectReference
+                // BuildRequest, not just top-level submissions.
+                if (response is null)
+                {
+                    response = TryStrictProjectCacheFastSkipChild(nodeForResults, request);
+                }
+
                 if (response != null)
                 {
                     TraceScheduler($"Request {request.GlobalRequestId} (node request {request.NodeRequestId}) satisfied from the cache.");
@@ -1919,6 +1940,15 @@ namespace Microsoft.Build.BackEnd
 
             // Do we already have results?  If so, just return them.
             ScheduleResponse response = TrySatisfyRequestFromCache(nodeForResults, request.BuildRequest, skippedResultsDoNotCauseCacheMiss: _componentHost.BuildParameters.SkippedResultsDoNotCauseCacheMiss());
+
+            // Tier-3 strict-mode project fast-skip: see HandleRequestBlockedByNewRequests for
+            // rationale. The unscheduled-request path also needs to be intercepted because a
+            // request that bypassed the cache check at intake time (because its config was
+            // not yet resolved, etc.) eventually drains through here.
+            if (response is null)
+            {
+                response = TryStrictProjectCacheFastSkipChild(nodeForResults, request.BuildRequest);
+            }
             if (response != null)
             {
                 if (response.Action == ScheduleActionType.SubmissionComplete)
@@ -2032,6 +2062,263 @@ namespace Microsoft.Build.BackEnd
             }
 
             return null;
+        }
+
+        // -----------------------------------------------------------------------------------
+        // Tier-3 strict-mode inner project cache hooks.
+        //
+        // The BuildManager already intercepts top-level submissions in
+        // TryStrictProjectCacheFastSkip / MaybeStoreOnCompletion. That covers only the root
+        // request of each submission – a `dotnet build` of a 47-project solution issues one
+        // top-level submission, but produces 46 ProjectReference BuildRequests that dispatch
+        // through the scheduler. The hooks below fire on every such inner request so the
+        // strict cache can short-circuit them too.
+        // -----------------------------------------------------------------------------------
+
+        /// <summary>
+        /// Attempt to satisfy a child BuildRequest from the on-disk strict project cache.
+        /// On hit, synthesises a BuildResult, stores it in the in-build results cache so any
+        /// later <see cref="TrySatisfyRequestFromCache"/> call will reuse the same data,
+        /// and returns a ScheduleResponse that completes the request without scheduling it
+        /// to a worker node. Returns null on miss or whenever the request cannot be served
+        /// (graph mode, project-instance override, isolation flags, etc.).
+        /// </summary>
+        private ScheduleResponse TryStrictProjectCacheFastSkipChild(int nodeForResults, BuildRequest request)
+        {
+            try
+            {
+                if (!Microsoft.Build.Execution.StrictProjectCache.IsEnabled())
+                {
+                    return null;
+                }
+                if (request is null || request.IsProxyBuildRequest())
+                {
+                    return null;
+                }
+
+                BuildRequestConfiguration config = _configCache[request.ConfigurationId];
+                if (config is null)
+                {
+                    return null;
+                }
+
+                string projectFullPath = config.ProjectFullPath;
+                if (string.IsNullOrEmpty(projectFullPath))
+                {
+                    return null;
+                }
+
+                // Defer when the caller pre-built a ProjectInstance and attached it to the
+                // configuration. In that case the engine has out-of-band state we cannot model.
+                if (config.Project is not null || config.IsLoaded)
+                {
+                    return null;
+                }
+
+                // Defer when the request specifies no explicit targets. We do not have a safe
+                // way to derive the default target set without loading the project.
+                List<string> targets = request.Targets;
+                if (targets is null || targets.Count == 0)
+                {
+                    return null;
+                }
+
+                // Defer for flags that change result semantics in ways the on-disk manifest
+                // does not capture.
+                BuildRequestDataFlags flags = request.BuildRequestDataFlags;
+                if ((flags & (BuildRequestDataFlags.ReplaceExistingProjectInstance
+                              | BuildRequestDataFlags.ClearCachesAfterBuild
+                              | BuildRequestDataFlags.ProvideProjectStateAfterBuild
+                              | BuildRequestDataFlags.ProvideSubsetOfStateAfterBuild)) != 0)
+                {
+                    return null;
+                }
+
+                // Defer in graph build mode – the engine already pre-computes a topological
+                // schedule and the graph driver has its own caching/isolation rules.
+                Dictionary<string, string> globalProps = ExtractGlobalProperties(config, out bool isGraphBuild);
+                if (isGraphBuild)
+                {
+                    return null;
+                }
+
+                Microsoft.Build.Execution.StrictProjectCache.CachedBuild cached =
+                    Microsoft.Build.Execution.StrictProjectCache.TryHit(
+                        projectFullPath,
+                        globalProps,
+                        targets,
+                        flags,
+                        out string cacheKey,
+                        out _);
+
+                if (cached is null)
+                {
+                    return null;
+                }
+
+                // Hit. Synthesise a BuildResult attached to this request and feed it into the
+                // results cache so dependent infrastructure (logging, parent satisfaction) can
+                // observe it identically to a normally-produced result.
+                BuildResult synth = new BuildResult(request);
+                cached.PopulateBuildResult(synth, targets);
+                _resultsCache.AddResult(synth);
+
+                // The caller (HandleRequestBlockedByNewRequests / ResolveRequestFromCacheAndResumeIfPossible)
+                // invokes LogRequestHandledFromCache after we return. That helper indirectly calls
+                // BuildRequestConfiguration.GetTargetsUsedToBuildRequest which used to assert that
+                // ProjectInitialTargets/ProjectDefaultTargets are non-null. We are short-circuiting
+                // BEFORE the project is loaded, so both are null. GetTargetsUsedToBuildRequest now
+                // returns an empty list in that case. We MUST NOT pre-populate the lists here:
+                // doing so latches them at [] and later, when the worker node finally loads the
+                // project for a different target, the one-shot setters throw "Initial targets
+                // cannot be reset" – which leaves the config with empty default targets and
+                // silently breaks downstream consumers (e.g. CS0234 namespace-not-found errors
+                // when ProjectReference resolution returns mis-targeted results).
+
+                Microsoft.Build.Execution.StrictProjectCache.MarkServedFromCache(request.GlobalRequestId);
+
+                return GetResponseForResult(nodeForResults, request, synth);
+            }
+            catch
+            {
+                // Strict-mode fast-skip is a pure optimisation. Any failure here MUST fall
+                // through to the normal build path with no observable effect.
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Persist the on-disk strict project cache manifest for a completed child request.
+        /// Skipped for root requests (handled by <c>BuildManager.MaybeStoreOnCompletion</c>),
+        /// for results that came from the strict cache themselves, and for any of the same
+        /// safety conditions enumerated in <see cref="TryStrictProjectCacheFastSkipChild"/>.
+        /// </summary>
+        private void TryStrictProjectCachePersistChild(BuildRequest request, BuildResult result)
+        {
+            try
+            {
+                if (!Microsoft.Build.Execution.StrictProjectCache.IsEnabled())
+                {
+                    return;
+                }
+                if (request is null || result is null)
+                {
+                    return;
+                }
+                if (request.IsRootRequest)
+                {
+                    // Root requests are persisted by BuildManager.MaybeStoreOnCompletion.
+                    return;
+                }
+                if (request.IsProxyBuildRequest())
+                {
+                    return;
+                }
+                if (Microsoft.Build.Execution.StrictProjectCache.TryConsumeServedFromCache(request.GlobalRequestId))
+                {
+                    // We synthesised this result from disk a moment ago – nothing to persist.
+                    return;
+                }
+                if (result.OverallResult != BuildResultCode.Success
+                    || result.Exception is not null
+                    || result.CircularDependency)
+                {
+                    return;
+                }
+
+                List<string> targets = request.Targets;
+                if (targets is null || targets.Count == 0)
+                {
+                    return;
+                }
+
+                BuildRequestDataFlags flags = request.BuildRequestDataFlags;
+                if ((flags & (BuildRequestDataFlags.ReplaceExistingProjectInstance
+                              | BuildRequestDataFlags.ClearCachesAfterBuild
+                              | BuildRequestDataFlags.ProvideProjectStateAfterBuild
+                              | BuildRequestDataFlags.ProvideSubsetOfStateAfterBuild)) != 0)
+                {
+                    return;
+                }
+
+                BuildRequestConfiguration config = _configCache[request.ConfigurationId];
+                if (config is null)
+                {
+                    return;
+                }
+
+                string projectFullPath = config.ProjectFullPath;
+                if (string.IsNullOrEmpty(projectFullPath))
+                {
+                    return;
+                }
+
+                Dictionary<string, string> globalProps = ExtractGlobalProperties(config, out bool isGraphBuild);
+                if (isGraphBuild)
+                {
+                    return;
+                }
+
+                // Compute the cache key by going through TryHit; on miss it populates cacheKey
+                // and we use that for persistence. On a hit (rare here – means a manifest was
+                // written between our read and now) we have nothing to do.
+                Microsoft.Build.Execution.StrictProjectCache.CachedBuild existing =
+                    Microsoft.Build.Execution.StrictProjectCache.TryHit(
+                        projectFullPath,
+                        globalProps,
+                        targets,
+                        flags,
+                        out string cacheKey,
+                        out _);
+
+                if (existing is not null || string.IsNullOrEmpty(cacheKey))
+                {
+                    return;
+                }
+
+                Microsoft.Build.Execution.StrictProjectCache.MaybeStoreResult(
+                    projectFullPath,
+                    globalProps,
+                    targets,
+                    cacheKey,
+                    result);
+            }
+            catch
+            {
+                // Optimisation only – never fail the build.
+            }
+        }
+
+        /// <summary>
+        /// Build a case-insensitive snapshot of the configuration's global properties and
+        /// detect whether this is a graph build along the way (the graph driver sets a
+        /// well-known global property on every config it produces).
+        /// </summary>
+        private static Dictionary<string, string> ExtractGlobalProperties(BuildRequestConfiguration config, out bool isGraphBuild)
+        {
+            isGraphBuild = false;
+            var props = config.GlobalProperties;
+            var dict = new Dictionary<string, string>(props?.Count ?? 0, StringComparer.OrdinalIgnoreCase);
+            if (props is null)
+            {
+                return dict;
+            }
+            foreach (var p in props)
+            {
+                if (p is null || string.IsNullOrEmpty(p.Name))
+                {
+                    continue;
+                }
+                string value = p.EvaluatedValue ?? string.Empty;
+                dict[p.Name] = value;
+                if (!isGraphBuild
+                    && string.Equals(p.Name, "IsGraphBuild", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(value, "true", StringComparison.OrdinalIgnoreCase))
+                {
+                    isGraphBuild = true;
+                }
+            }
+            return dict;
         }
 
         /// <returns>True if caches misses are allowed, false otherwise</returns>

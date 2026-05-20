@@ -849,8 +849,23 @@ namespace Microsoft.Build.CommandLine
                     }
                     else // regular build
                     {
+                        // Strict-mode solution-level fast-skip. When the previous successful build's
+                        // input + output stamps still match, bypass the engine entirely. This is the
+                        // only practical way to beat the per-project evaluation + restore floor on
+                        // a true no-op (~17 s on a 47-project SDK solution -> <1 s on hit).
+                        Microsoft.Build.Strict.StrictSolutionFastSkip.PreBuildInputSnapshot preBuildFastSkipInputs = null;
+                        if (Microsoft.Build.Strict.StrictSolutionFastSkip.IsEnabled())
+                        {
+                            preBuildFastSkipInputs = Microsoft.Build.Strict.StrictSolutionFastSkip.CapturePreBuildInputSnapshot(projectFile);
+                        }
+
+                        if (Microsoft.Build.Strict.StrictSolutionFastSkip.TryFastSkip(projectFile, targets, globalProperties, out string fastSkipReason))
+                        {
+                            Console.Out.WriteLine($"[strict] fast-skip HIT ({fastSkipReason}) — build skipped");
+                            exitType = ExitType.Success;
+                        }
                         // if everything checks out, and sufficient information is available to start building
-                        if (
+                        else if (
                             !BuildProject(
                                 projectFile,
                                 targets,
@@ -892,6 +907,11 @@ namespace Microsoft.Build.CommandLine
                                     commandLine))
                         {
                             exitType = ExitType.BuildError;
+                        }
+                        else
+                        {
+                            // Build succeeded — record manifest for next-invocation fast-skip.
+                            Microsoft.Build.Strict.StrictSolutionFastSkip.RecordSuccess(projectFile, targets, globalProperties, preBuildFastSkipInputs);
                         }
                     } // end of build
 

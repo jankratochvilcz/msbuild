@@ -6,6 +6,8 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 
 using Microsoft.Build.Collections;
 using Microsoft.Build.Evaluation;
@@ -764,6 +766,20 @@ namespace Microsoft.Build.BackEnd
             DependencyAnalysisResult result;
             if (someOutOfDate)
             {
+                // ---- Strict-mode content-hash cache ----
+                // The author already told us what the inputs and outputs are; in strict mode
+                // we attempt a content-hash lookup before doing the real work. On hit we
+                // restore outputs and report SkipUpToDate; on miss we snapshot for later
+                // capture by PersistStrictCacheOnSuccess.
+                if (StrictTargetCache.IsEnabled(_project) && !StrictTargetCache.IsTargetExempt(_project, _targetToAnalyze.Name))
+                {
+                    _strictCache ??= new StrictTargetCache(_project, _targetToAnalyze.Name, _loggingService, _buildEventContext);
+                    if (_strictCache.TryRestore(inputs, outputs))
+                    {
+                        RecordUniqueInputsAndOutputs(inputs, outputs);
+                        return DependencyAnalysisResult.SkipUpToDate;
+                    }
+                }
                 _dependencyAnalysisDetail.Add(dependencyAnalysisDetailEntry);
                 result = DependencyAnalysisResult.FullBuild;
             }
@@ -1133,6 +1149,30 @@ namespace Microsoft.Build.BackEnd
             ProjectErrorUtilities.VerifyThrowInvalidProject(output.AsSpan().IndexOfAny(MSBuildConstants.InvalidPathChars) < 0, _project.ProjectFileLocation, "IllegalCharactersInFileOrDirectory", output, outputItemName);
             bool outOfDate = (CompareLastWriteTimes(input, output, out bool inputDoesNotExist, out bool outputDoesNotExist) == 1) || inputDoesNotExist;
 
+            // ---- MSBuild "Strict Mode" content-hash override ----
+            // When MSBuildStrictMode=true (project property or MSBUILDSTRICTMODE=1 env var),
+            // a timestamp-driven "out of date" verdict is overridden if the input's *content*
+            // hash is unchanged since the last time we observed a change. This makes `touch`
+            // and file-system metadata churn no-ops for incremental builds.
+            //
+            // We only hash on the slow path (timestamp says "out of date"), never on no-op
+            // builds where the timestamp check already accepted the file.
+            if (outOfDate && !inputDoesNotExist && !outputDoesNotExist && StrictModeEnabled)
+            {
+                if (StrictMode_InputContentUnchanged(input))
+                {
+                    _loggingService.LogCommentFromText(_buildEventContext, MessageImportance.Low,
+                        "[strict] '{0}' timestamp changed but content unchanged; treating as up-to-date.", input);
+                    outOfDate = false;
+                }
+                else
+                {
+                    // Content really changed (or first observation); refresh sidecar so the
+                    // *next* timestamp-only churn is absorbed.
+                    StrictMode_UpdateInputSidecar(input);
+                }
+            }
+
             // Only if we are not logging just critical events should we be gathering full details
             if (!_loggingService.OnlyLogCriticalEvents)
             {
@@ -1231,6 +1271,18 @@ namespace Microsoft.Build.BackEnd
             return DateTime.Compare(path1WriteTime, path2WriteTime);
         }
 
+        // Engine-side strict cache; only allocated when strict mode is enabled and a
+        // miss is recorded. Exposed via PersistStrictCacheOnSuccess so TargetEntry can
+        // finalize the cache entry once the target has actually run successfully.
+        private StrictTargetCache _strictCache;
+
+        internal void PersistStrictCacheOnSuccess()
+        {
+            _strictCache?.PersistOnSuccess();
+        }
+
+        internal bool HasStrictViolation => _strictCache?.HasViolation == true;
+
         #endregion
 
         // the project whose target we are analyzing.
@@ -1256,6 +1308,87 @@ namespace Microsoft.Build.BackEnd
         /// But allow suites to enable this so they get consistent results.
         /// </summary>
         private static readonly bool s_sortInputsOutputs = (Environment.GetEnvironmentVariable("MSBUILDSORTINPUTSOUTPUTS") == "1");
+
+        #region MSBuild Strict Mode (content-hash override)
+
+        private bool? _strictModeEnabledCache;
+
+        private bool StrictModeEnabled
+        {
+            get
+            {
+                if (_strictModeEnabledCache.HasValue)
+                {
+                    return _strictModeEnabledCache.Value;
+                }
+                bool enabled = Microsoft.Build.Strict.StrictModeSettings.ResolveLevel(
+                    _project?.GetPropertyValue(Microsoft.Build.Strict.StrictModeSettings.ProjectPropertyName))
+                    != Microsoft.Build.Strict.StrictModeLevel.Off;
+                _strictModeEnabledCache = enabled;
+                return enabled;
+            }
+        }
+
+        private string StrictMode_SidecarPath(string inputFullPath)
+        {
+            // Per-project sidecar directory keeps it scoped and easy to nuke with `dotnet clean`.
+            string root = Path.Combine(_project.Directory, "obj", ".strict-mtime-cache");
+            using var sha = SHA256.Create();
+            string key = StrictMode_HexEncode(sha.ComputeHash(Encoding.UTF8.GetBytes(inputFullPath.ToLowerInvariant())));
+            return Path.Combine(root, key + ".sha");
+        }
+
+        private static string StrictMode_HashFile(string path)
+        {
+            using var fs = File.OpenRead(path);
+            using var sha = SHA256.Create();
+            return StrictMode_HexEncode(sha.ComputeHash(fs));
+        }
+
+        private static string StrictMode_HexEncode(byte[] bytes)
+        {
+            var sb = new StringBuilder(bytes.Length * 2);
+            foreach (byte b in bytes)
+            {
+                sb.Append(b.ToString("X2"));
+            }
+            return sb.ToString();
+        }
+
+        private bool StrictMode_InputContentUnchanged(string input)
+        {
+            try
+            {
+                string sidecar = StrictMode_SidecarPath(input);
+                if (!File.Exists(sidecar))
+                {
+                    return false;
+                }
+                string recorded = File.ReadAllText(sidecar).Trim();
+                string current = StrictMode_HashFile(input);
+                return string.Equals(recorded, current, StringComparison.Ordinal);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void StrictMode_UpdateInputSidecar(string input)
+        {
+            try
+            {
+                string sidecar = StrictMode_SidecarPath(input);
+                Directory.CreateDirectory(Path.GetDirectoryName(sidecar));
+                File.WriteAllText(sidecar, StrictMode_HashFile(input));
+            }
+            catch
+            {
+                // Sidecar maintenance is best-effort; never fail the build over it.
+            }
+        }
+
+        #endregion
 
         /// <summary>
         /// The unique target inputs.
