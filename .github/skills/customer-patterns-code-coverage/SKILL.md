@@ -24,9 +24,10 @@ For the motivation and scope, see the epic: `jankratochvilcz/msbuild#31`.
 | Project number | `2` |
 | Owner | `jankratochvilcz` (user, not org) |
 | Status field ID | `PVTSSF_lAHOACGbd84BYTUBzhTaHQc` |
-| Status: Todo | `f75ad846` |
-| Status: In Progress | `47fc9ee4` |
-| Status: Done | `98236657` |
+| Status: Todo | `6454483e` |
+| Status: In Progress | `67a5530b` |
+| Status: Review | `536246fe` |
+| Status: Done | `ad446cde` |
 
 Re-derive if needed:
 
@@ -34,16 +35,19 @@ Re-derive if needed:
 gh project field-list 2 --owner jankratochvilcz --format json
 ```
 
+> Note: option IDs are regenerated whenever you re-run `updateProjectV2Field` with a new options list. If you change the columns, refresh this table.
+
 ## Workflow at a glance
 
 1. **Pick a survey target** — a feature area of MSBuild (e.g., item batching, item function chains, target ordering, `MSBuild` task call patterns, intrinsic tasks, property functions, condition evaluation, SDK resolution, custom task factories, logger event ordering).
 2. **Mine real usage** of that area on GitHub across popular .NET OSS repos.
 3. **Cross-reference our tests** — find the existing test file(s) for that area, audit what is and isn't already exercised.
-4. **File a guard-test ticket** per coverage gap, with the customer citation in the body, and add it to the project board in **Todo**.
-5. **Implement** — move the ticket to **In Progress**, write the test in this worktree with a citation comment in the test code itself, build, run the test, commit.
-6. **Move to Done** on the project board once merged (or, while we're working in the fork only, once the test is pushed to `jankratochvilcz/customer-patterns-code-coverage`).
+4. **Locate the relevant implementation** — identify the file(s), classes, and methods that would have to break for the customer pattern to regress. These pointers go in the ticket *and* in the test's doc comment.
+5. **File a guard-test ticket** per coverage gap. Body must include the customer citation, a **minimal but complete repro XML**, the implementation pointers, and the proposed assertions. Add to the project board in **Todo**.
+6. **Implement** — move the ticket to **In Progress**, branch off `upstream/main` (one branch per ticket), write the test, build, run the test, commit, push.
+7. **Open a PR** against `jankratochvilcz/msbuild:main` (one PR per ticket). Move the ticket to **Review**. The PR closes the issue on merge; the ticket moves to **Done** automatically.
 
-Every guard test must answer one question in its top comment: **"What real-world author behavior would break if this test failed?"**
+Every guard test must answer one question in its top comment: **what real-world author behavior would break if this test failed?** That comment should *not* contain issue or PR numbers — those drift; the customer-source reference is what stays meaningful long-term.
 
 ## Step 1: Pick a survey target
 
@@ -105,39 +109,40 @@ Cheap mappings:
 
 Inside the candidate file, search for keywords near your pattern (`grep` on the method names) to confirm whether the unusual shape is exercised. The gap is real if you can describe an input shape that has no analog in the existing tests.
 
-## Step 4: File a guard-test ticket
+## Step 4: Locate the relevant implementation
+
+For the gap you found, identify **which code would have to break** for the customer pattern to regress. The goal is a short list of files/classes/methods (and ideally line ranges) that future engineers can scan when the test fails or when refactoring nearby.
+
+Cheap mappings:
+
+| Pattern area | Likely implementation home |
+|---|---|
+| Item functions (`Distinct`, `WithMetadataValue`, `AnyHaveMetadataValue`, `Reverse`, `Metadata`, `DirectoryName`, etc.) | `Expander.ItemTransformFunctions.*` in `src/Build/Evaluation/Expander.cs` (look at the function dispatch table near the top of the class, then the static `internal static void <Name>` methods further down) |
+| Property functions and quoted-expression functions | `Expander.cs` (`ExpandQuotedExpressionFunction`, `ExpandPropertyBody`, friends) |
+| Condition evaluation | `src/Build/Evaluation/Conditionals/` (Scanner/Parser/AndExpressionNode/etc.) |
+| `MSBuild` *task* (`Properties`, `RemoveProperties`, `Projects`, `Targets`, `BuildInParallel`) | `src/Tasks/MSBuild.cs` |
+| `MSBuild` *intrinsic task* (the engine-side counterpart, including `SkipNonexistentTargets`) | `src/Build/BackEnd/Components/RequestBuilder/IntrinsicTasks/MSBuild.cs` |
+| Target skipping / `SkipNonexistentTargets` flag plumbing | `src/Build/BackEnd/Components/RequestBuilder/TargetBuilder.cs`, `RequestBuilder.cs`, `TaskBuilder.cs`, `src/Build/BackEnd/Components/Scheduler/Scheduler.cs` |
+| Batching loop | `src/Build/BackEnd/Components/RequestBuilder/Batch/`, `TaskExecutionHost` |
+| Evaluation phases / property and item evaluation order | `src/Build/Evaluation/Evaluator.cs` |
+
+Use `grep` and `lsp` to confirm. A good list cites **3–6 concrete spots**, no more. Avoid listing every file that mentions the feature name.
+
+## Step 5: File a guard-test ticket
 
 Issue title format: `[Guard test] <area>: <one-line pattern description>` — e.g. `[Guard test] MSBuild task: RemoveProperties combined with Properties on the same call`.
 
-Issue body template:
+Issue body must include:
 
-```markdown
-## Customer pattern
+1. **Customer pattern** — one short paragraph and a permalinked citation (commit SHA, not `main`).
+2. **Minimal repro** — a *complete* MSBuild project (or pair of projects) the reader can paste into two files and run. It must reproduce the shape we're guarding in the smallest form possible: literal item identities and metadata where they matter, no SDK dependency, only the targets needed. Annotate the repro with the expected output.
+3. **MSBuild feature exercised** — the bullet list of behaviors the pattern depends on.
+4. **Relevant implementation** — the 3–6 files/classes/methods identified in Step 4.
+5. **Coverage gap** — which existing test file is the natural home and what shape is missing.
+6. **Proposed guard test** — the assertions, in plain English.
+7. **Parent** — `#<epic number>`.
 
-<one short paragraph describing what real authors do>
-
-Observed in:
-- <repo>/<path>@<sha> — <permalink> — <snippet, 5–15 lines>
-- (additional citations if found in multiple repos)
-
-## MSBuild feature exercised
-
-<which MSBuild feature(s) — e.g. "MSBuild task `RemoveProperties` interaction with `Properties` on the same call">
-
-## Coverage gap
-
-<which test file looks like the natural home, and what it currently does NOT exercise>
-
-## Proposed guard test
-
-<bullet list of inputs / expected behaviors the test should pin down>
-
-## Parent
-
-#31
-```
-
-Then add the issue to the project board in **Todo**:
+Add the issue to the project board in **Todo**:
 
 ```powershell
 $issue = "https://github.com/jankratochvilcz/msbuild/issues/<N>"
@@ -146,28 +151,40 @@ gh project item-add 2 --owner jankratochvilcz --url $issue --format json
 
 The item lands in **Todo** by default for new issues; if you need to set it explicitly, see "Moving items on the board" below.
 
-## Step 5: Implement the guard test
+## Step 6: Implement the guard test
 
-Before starting work on a ticket, move it to **In Progress** (see below).
+Before starting work on a ticket, move it to **In Progress**, then branch off `upstream/main`:
+
+```powershell
+cd D:\src\microsoft\personal\msbuild-customer-patterns
+git fetch upstream
+git checkout -b jankratochvilcz/guard-test-issue-<N> upstream/main
+```
+
+> **One branch and one PR per ticket.** The long-lived `jankratochvilcz/customer-patterns-code-coverage` branch holds only this skill and other shared assets; *do not* land tests on it. Each PR rebases cleanly on `upstream/main` and can be reviewed and merged in isolation.
 
 Test authoring rules:
 
 1. **Make the test hermetic** — use the existing test harness helpers (`ObjectModelHelpers.CreateInMemoryProject`, `MockLogger`, `TestEnvironment`), no network, no external SDK lookups beyond what the test infrastructure already brings.
-2. **Put the citation in the test code, not just the ticket.** A future engineer reading the test should be able to tell what they would break if they deleted it:
+2. **Doc comment is the long-term record.** Keep it compact and answer two questions:
+   * What customer pattern does this guard? Name the repo + file (no commit SHA needed in the comment — that drifts; the issue tracks the SHA).
+   * What relevant implementation does it pin down? Name the class and method(s) inside `Expander.cs` / `MSBuild.cs` / etc.
+
+   **Do not** put issue, PR, or epic numbers in the test's doc comment. They drift over forks and rebases; the customer-source citation is what stays meaningful.
+
+   Template:
 
    ```csharp
    /// <summary>
-   /// Guards the pattern from dotnet/sdk's GenerateBuildDependencyFile.targets where
-   /// `RemoveProperties` is used on a recursive MSBuild task call to drop the parent's
-   /// `TargetFramework` before reentering. If our task ever stopped honoring this combo,
-   /// every multi-targeted build in the .NET SDK would silently regress.
+   /// Customer-pattern guard: &lt;one-line description of the shape&gt;. Matches the shape
+   /// &lt;repo&gt;/&lt;file&gt; uses to &lt;what it does&gt;:
+   /// <code>&lt;tightened single-line XML or expression&gt;</code>
+   /// &lt;one-line description of the branches the test pins down&gt;
    ///
-   /// Source: https://github.com/dotnet/sdk/blob/&lt;sha&gt;/&lt;path&gt;#L&lt;n&gt;-L&lt;m&gt;
-   /// Tracked by: https://github.com/jankratochvilcz/msbuild/issues/&lt;N&gt;
+   /// Relevant impl: &lt;class.method(s)&gt; in &lt;source file&gt;.
    /// </summary>
    [Fact]
-   public void MSBuildTask_RemoveProperties_With_Properties_Drops_Then_Sets()
-   { ... }
+   public void Foo_Bar_Baz() { ... }
    ```
 
 3. **Pin a behavior, not an implementation.** Assert on observable outputs (target results, properties returned, logged events, ItemGroups produced), not on internal call counts.
@@ -179,10 +196,32 @@ Commit message format:
 ```
 Guard test: <area> — <pattern>
 
-Guards customer pattern observed in <repo>@<sha>. See #<N>.
+<2–3 sentences describing the customer pattern and what the test pins down>
 ```
 
-Then `git push` to your fork branch.
+Then `git push -u origin jankratochvilcz/guard-test-issue-<N>`.
+
+## Step 7: Open a PR and move to Review
+
+One PR per ticket, against `jankratochvilcz/msbuild:main`:
+
+```powershell
+gh pr create `
+  --repo jankratochvilcz/msbuild `
+  --base main `
+  --head jankratochvilcz:jankratochvilcz/guard-test-issue-<N> `
+  --title "Guard test: <area> — <pattern>" `
+  --body-file pr-body.md
+```
+
+The PR body should briefly describe:
+
+- the customer pattern (repo + permalinked file),
+- what the test pins down (the assertions in plain English),
+- the relevant implementation (mirror the issue's pointers),
+- `Closes #<N>.`
+
+Then move the ticket to **Review** on the project board. Leave it there until the PR merges — at which point GitHub auto-closes the issue and you move it to **Done**.
 
 ## Moving items on the board
 
@@ -204,10 +243,11 @@ gh project item-edit `
   --id <PVTI_...> `
   --project-id PVT_kwHOACGbd84BYTUB `
   --field-id PVTSSF_lAHOACGbd84BYTUBzhTaHQc `
-  --single-select-option-id 47fc9ee4
+  --single-select-option-id 67a5530b
 
-# Move to Done (use 98236657)
-# Move back to Todo (use f75ad846)
+# Move to Review (use 536246fe)
+# Move to Done   (use ad446cde)
+# Move back to Todo (use 6454483e)
 ```
 
 **Always update the board as you transition:**
@@ -216,10 +256,11 @@ gh project item-edit `
 |---|---|
 | Filing a new ticket | Add to project (auto-lands in Todo) |
 | Starting work on a ticket | Move to **In Progress** |
-| Test is written, built, run, and pushed | Move to **Done** *and* close the issue (or leave open if waiting on user review) |
+| PR opened against `jankratochvilcz/msbuild:main` | Move to **Review** |
+| PR merged | Move to **Done** (GitHub will have auto-closed the issue via `Closes #<N>`) |
 | Blocked or pivoted | Comment why, move back to **Todo** |
 
-The board status should always match reality. If you've written the test but haven't pushed, the item stays in **In Progress**.
+The board status should always match reality. If you've written the test but haven't opened a PR, the item stays in **In Progress**.
 
 ## Closing the loop on the epic
 
