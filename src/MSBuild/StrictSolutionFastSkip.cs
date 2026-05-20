@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
+using System.Xml;
 
 #nullable disable
 
@@ -288,7 +289,7 @@ namespace Microsoft.Build.Strict
 
                 var m = new Manifest
                 {
-                    SchemaVersion = 2,
+                    SchemaVersion = 3,
                     ProjectFile = projectFile,
                     RecordedAt = DateTime.UtcNow.Ticks,
                     Inputs = inputs,
@@ -374,7 +375,8 @@ namespace Microsoft.Build.Strict
         {
             var result = new Dictionary<string, Stat>(StringComparer.OrdinalIgnoreCase);
             var dirsLocal = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-            EnumerateDirRecursive(root, dirsLocal, (path) =>
+            HashSet<string> outputDirectories = DiscoverOutputDirectories(root);
+            EnumerateDirRecursive(root, dirsLocal, outputDirectories, (path) =>
             {
                 if (ShouldSkipPath(path)) { return; }
                 string ext = Path.GetExtension(path);
@@ -400,7 +402,6 @@ namespace Microsoft.Build.Strict
                     }
                     if (!matched)
                     {
-                        // Honour the runtime escape hatch ($MSBUILDSTRICTEXTRAINPUTEXTENSIONS).
                         var extra = Microsoft.Build.Strict.StrictModeSettings.GetExtraInputExtensions();
                         if (extra.Count == 0 || !extra.Contains(ext)) { return; }
                     }
@@ -451,6 +452,45 @@ namespace Microsoft.Build.Strict
         private static Dictionary<string, Stat> EnumerateOutputs(string root)
         {
             var result = new Dictionary<string, Stat>(StringComparer.OrdinalIgnoreCase);
+            foreach (string outputDirectory in DiscoverOutputDirectories(root))
+            {
+                try
+                {
+                    if (!Directory.Exists(outputDirectory))
+                    {
+                        continue;
+                    }
+
+                    foreach (var f in Directory.EnumerateFiles(outputDirectory, "*", SearchOption.AllDirectories))
+                    {
+                        if (f.IndexOf(CacheDirName, StringComparison.OrdinalIgnoreCase) >= 0) { continue; }
+                        if (f.IndexOf(".strict-cache", StringComparison.OrdinalIgnoreCase) >= 0) { continue; }
+                        try
+                        {
+                            var fi = new FileInfo(f);
+                            if (fi.Exists)
+                            {
+                                result[f] = new Stat(fi.LastWriteTimeUtc.Ticks, fi.Length);
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+            }
+            return result;
+        }
+
+        private static HashSet<string> DiscoverOutputDirectories(string root)
+        {
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            AddDefaultOutputDirectories(root, result);
+            AddConfiguredOutputDirectories(root, result);
+            return result;
+        }
+
+        private static void AddDefaultOutputDirectories(string root, HashSet<string> result)
+        {
             try
             {
                 foreach (var dirName in new[] { "bin", "obj" })
@@ -458,25 +498,253 @@ namespace Microsoft.Build.Strict
                     foreach (var dir in Directory.EnumerateDirectories(root, dirName, SearchOption.AllDirectories))
                     {
                         if (dir.IndexOf(CacheDirName, StringComparison.OrdinalIgnoreCase) >= 0) { continue; }
-                        foreach (var f in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
-                        {
-                            if (f.IndexOf(CacheDirName, StringComparison.OrdinalIgnoreCase) >= 0) { continue; }
-                            if (f.IndexOf(".strict-cache", StringComparison.OrdinalIgnoreCase) >= 0) { continue; }
-                            try
-                            {
-                                var fi = new FileInfo(f);
-                                if (fi.Exists)
-                                {
-                                    result[f] = new Stat(fi.LastWriteTimeUtc.Ticks, fi.Length);
-                                }
-                            }
-                            catch { }
-                        }
+                        if (dir.IndexOf(".strict-cache", StringComparison.OrdinalIgnoreCase) >= 0) { continue; }
+                        result.Add(Path.GetFullPath(dir));
                     }
                 }
             }
             catch { }
-            return result;
+        }
+
+        private static void AddConfiguredOutputDirectories(string root, HashSet<string> result)
+        {
+            bool useArtifactsOutput = false;
+            HashSet<string> artifactRoots = new(StringComparer.OrdinalIgnoreCase);
+
+            foreach (string filePath in EnumerateOutputConfigurationFiles(root))
+            {
+                string fileDirectory = Path.GetDirectoryName(filePath);
+                if (string.IsNullOrEmpty(fileDirectory))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    using var stream = File.OpenRead(filePath);
+                    using var reader = XmlReader.Create(stream, new XmlReaderSettings { DtdProcessing = DtdProcessing.Ignore });
+                    HashSet<int> unconditionalPropertyGroupDepths = [];
+                    Dictionary<int, bool> blockedDepths = new();
+                    while (reader.Read())
+                    {
+                        if (reader.NodeType == XmlNodeType.EndElement)
+                        {
+                            unconditionalPropertyGroupDepths.Remove(reader.Depth);
+                            blockedDepths.Remove(reader.Depth);
+                            continue;
+                        }
+
+                        if (reader.NodeType != XmlNodeType.Element)
+                        {
+                            continue;
+                        }
+
+                        int depth = reader.Depth;
+                        bool parentBlocked = depth > 0
+                            && blockedDepths.TryGetValue(depth - 1, out bool blockedParent)
+                            && blockedParent;
+                        bool blockedHere = parentBlocked || HasNonEmptyCondition(reader) || IsConditionalContainer(reader.LocalName);
+                        blockedDepths[depth] = blockedHere;
+
+                        if (reader.IsEmptyElement)
+                        {
+                            unconditionalPropertyGroupDepths.Remove(depth);
+                            continue;
+                        }
+
+                        if (blockedHere)
+                        {
+                            continue;
+                        }
+
+                        if (reader.LocalName.Equals("PropertyGroup", StringComparison.OrdinalIgnoreCase))
+                        {
+                            unconditionalPropertyGroupDepths.Add(depth);
+                            continue;
+                        }
+
+                        if (!unconditionalPropertyGroupDepths.Contains(depth - 1))
+                        {
+                            continue;
+                        }
+
+                        switch (reader.LocalName)
+                        {
+                            case "OutputPath":
+                            case "BaseOutputPath":
+                            case "IntermediateOutputPath":
+                            case "BaseIntermediateOutputPath":
+                            case "PublishDir":
+                                if (TryResolveStaticPath(fileDirectory, ReadSimpleElementContent(reader), out string resolvedDirectory))
+                                {
+                                    result.Add(resolvedDirectory);
+                                }
+                                break;
+                            case "ArtifactsPath":
+                                if (TryResolveStaticPath(fileDirectory, ReadSimpleElementContent(reader), out string resolvedArtifactsRoot))
+                                {
+                                    artifactRoots.Add(resolvedArtifactsRoot);
+                                }
+                                break;
+                            case "UseArtifactsOutput":
+                                useArtifactsOutput |= IsTruthy(ReadSimpleElementContent(reader));
+                                break;
+                        }
+                    }
+                }
+                catch
+                {
+                    continue;
+                }
+            }
+
+            if (useArtifactsOutput)
+            {
+                if (artifactRoots.Count == 0)
+                {
+                    artifactRoots.Add(Path.GetFullPath(Path.Combine(root, "artifacts")));
+                }
+
+                foreach (string artifactRoot in artifactRoots)
+                {
+                    result.Add(Path.Combine(artifactRoot, "bin"));
+                    result.Add(Path.Combine(artifactRoot, "obj"));
+                }
+            }
+        }
+
+        private static IEnumerable<string> EnumerateOutputConfigurationFiles(string root)
+        {
+            var extensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ".csproj", ".vbproj", ".fsproj", ".vcxproj", ".proj", ".props", ".targets",
+            };
+
+            foreach (string filePath in EnumerateOutputConfigurationFilesRecursive(root, extensions))
+            {
+                yield return filePath;
+            }
+        }
+
+        private static IEnumerable<string> EnumerateOutputConfigurationFilesRecursive(string directory, HashSet<string> extensions)
+        {
+            IEnumerable<string> files;
+            try
+            {
+                files = Directory.EnumerateFiles(directory);
+            }
+            catch
+            {
+                yield break;
+            }
+
+            foreach (string filePath in files)
+            {
+                if (extensions.Contains(Path.GetExtension(filePath)))
+                {
+                    yield return filePath;
+                }
+            }
+
+            IEnumerable<string> subdirectories;
+            try
+            {
+                subdirectories = Directory.EnumerateDirectories(directory);
+            }
+            catch
+            {
+                yield break;
+            }
+
+            foreach (string subdirectory in subdirectories)
+            {
+                if (ShouldSkipOutputConfigurationDirectory(Path.GetFileName(subdirectory)))
+                {
+                    continue;
+                }
+
+                foreach (string filePath in EnumerateOutputConfigurationFilesRecursive(subdirectory, extensions))
+                {
+                    yield return filePath;
+                }
+            }
+        }
+
+        private static bool HasNonEmptyCondition(XmlReader reader)
+        {
+            return !string.IsNullOrWhiteSpace(reader.GetAttribute("Condition"));
+        }
+
+        private static bool IsConditionalContainer(string elementName)
+        {
+            return elementName.Equals("Choose", StringComparison.OrdinalIgnoreCase)
+                || elementName.Equals("When", StringComparison.OrdinalIgnoreCase)
+                || elementName.Equals("Otherwise", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string ReadSimpleElementContent(XmlReader reader)
+        {
+            int depth = reader.Depth;
+            StringBuilder builder = null;
+            while (reader.Read())
+            {
+                if (reader.NodeType == XmlNodeType.EndElement && reader.Depth == depth)
+                {
+                    break;
+                }
+
+                if (reader.NodeType is XmlNodeType.Text or XmlNodeType.CDATA or XmlNodeType.Whitespace or XmlNodeType.SignificantWhitespace)
+                {
+                    builder ??= new StringBuilder();
+                    builder.Append(reader.Value);
+                }
+            }
+
+            return builder?.ToString() ?? string.Empty;
+        }
+
+        private static bool ShouldSkipOutputConfigurationDirectory(string directoryName)
+        {
+            return directoryName.Equals(".git", StringComparison.OrdinalIgnoreCase)
+                || directoryName.Equals(".vs", StringComparison.OrdinalIgnoreCase)
+                || directoryName.Equals("node_modules", StringComparison.OrdinalIgnoreCase)
+                || directoryName.Equals(CacheDirName, StringComparison.OrdinalIgnoreCase)
+                || directoryName.Equals(".strict-cache", StringComparison.OrdinalIgnoreCase)
+                || directoryName.Equals(".strict-solution-cache", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool TryResolveStaticPath(string baseDirectory, string value, out string resolvedPath)
+        {
+            resolvedPath = null;
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            string trimmed = value.Trim();
+            if (trimmed.IndexOf('$') >= 0 || trimmed.IndexOf('%') >= 0 || trimmed.IndexOf('@') >= 0)
+            {
+                return false;
+            }
+
+            resolvedPath = Path.GetFullPath(Path.IsPathRooted(trimmed)
+                ? trimmed
+                : Path.Combine(baseDirectory, trimmed));
+            return true;
+        }
+
+        private static bool IsTruthy(string value)
+        {
+            if (value is null)
+            {
+                return false;
+            }
+
+            string trimmed = value.Trim();
+            return trimmed.Equals("true", StringComparison.OrdinalIgnoreCase)
+                || trimmed.Equals("1", StringComparison.OrdinalIgnoreCase)
+                || trimmed.Equals("yes", StringComparison.OrdinalIgnoreCase)
+                || trimmed.Equals("on", StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool ShouldSkipPath(string path)
@@ -488,7 +756,7 @@ namespace Microsoft.Build.Strict
             return false;
         }
 
-        private static void EnumerateDirRecursive(string dir, Dictionary<string, long> dirs, Action<string> onFile)
+        private static void EnumerateDirRecursive(string dir, Dictionary<string, long> dirs, HashSet<string> outputDirectories, Action<string> onFile)
         {
             try
             {
@@ -514,10 +782,42 @@ namespace Microsoft.Build.Strict
                     if (name.Equals("node_modules", StringComparison.OrdinalIgnoreCase)) { continue; }
                     if (name.Equals(CacheDirName, StringComparison.OrdinalIgnoreCase)) { continue; }
                     if (name.Equals(".strict-cache", StringComparison.OrdinalIgnoreCase)) { continue; }
-                    EnumerateDirRecursive(sub, dirs, onFile);
+                    if (IsUnderAnyOutputDirectory(sub, outputDirectories)) { continue; }
+                    EnumerateDirRecursive(sub, dirs, outputDirectories, onFile);
                 }
             }
             catch { }
+        }
+
+        private static bool IsUnderAnyOutputDirectory(string path, HashSet<string> outputDirectories)
+        {
+            foreach (string outputDirectory in outputDirectories)
+            {
+                if (IsUnderOrEqual(path, outputDirectory))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsUnderOrEqual(string path, string root)
+        {
+            if (string.IsNullOrEmpty(path) || string.IsNullOrEmpty(root))
+            {
+                return false;
+            }
+
+            string fullPath = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (fullPath.Equals(fullRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return fullPath.StartsWith(fullRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                || fullPath.StartsWith(fullRoot + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
         }
 
         internal readonly struct Stat
@@ -559,7 +859,7 @@ namespace Microsoft.Build.Strict
                     {
                         SchemaVersion = r.ReadInt32(),
                     };
-                    if (m.SchemaVersion != 2) { return null; }
+                    if (m.SchemaVersion != 3) { return null; }
                     m.ProjectFile = r.ReadString();
                     m.RecordedAt = r.ReadInt64();
                     m.Inputs = ReadDict(r);

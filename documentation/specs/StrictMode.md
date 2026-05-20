@@ -147,7 +147,7 @@ written when strict mode is off.
 
 | Layer | Cache root | Manifest filename | Schema version | Source |
 | ----- | ---------- | ----------------- | -------------- | ------ |
-| `StrictSolutionFastSkip` | `<workload-root>\.strict-fastskip\` | `<sha256(args)>.manifest` | 2 | `src/MSBuild/StrictSolutionFastSkip.cs` |
+| `StrictSolutionFastSkip` | `<workload-root>\.strict-fastskip\` | `<sha256(args)>.manifest` | 3 | `src/MSBuild/StrictSolutionFastSkip.cs` |
 | `StrictProjectCache` | `<ProjectDir>\obj\.strict-project\` | `<sha256(key)>.manifest` | 1 | `src/Build/BackEnd/BuildManager/StrictProjectCache.cs` |
 | `StrictTargetCache` | `$(BaseIntermediateOutputPath)\.strict-cache\v1\<target>\<sha256(key)>\` | `out\decl\`, `out\obs\`, `observed.list`, `.ok`, `inputs.stamp` (per project, under `v1\`) | 1 (path-segment schema) | `src/Build/BackEnd/Components/RequestBuilder/StrictTargetCache.cs` |
 
@@ -164,6 +164,11 @@ Notes:
 - `StrictSolutionFastSkip` snapshots scanned inputs before the build and, when recording the success manifest, reclassifies
   any input-like files the build added or rewrote as `Outputs` instead of `Inputs`. That keeps in-tree generated sources
   from becoming canonical pre-build inputs while still validating their post-build stamps on the next fast-skip attempt.
+- `StrictSolutionFastSkip` enumerates outputs from the default `bin\` / `obj\` roots plus static MSBuild property values found in
+  project / `.props` / `.targets` files under the workload root for `OutputPath`, `BaseOutputPath`, `IntermediateOutputPath`,
+  `BaseIntermediateOutputPath`, `PublishDir`, `ArtifactsPath`, and `UseArtifactsOutput`. Only unconditional `PropertyGroup`
+  entries are honored, and relative paths are resolved against the file that declares them. Dynamic expressions that depend on
+  `$(Property)`, `%(Metadata)`, or `@(Items)` still fall back to the default roots until stricter evaluation-aware probing exists.
 - The target cache uses a content-addressed directory tree per `(target, key)` rather than a single manifest file;
   the schema version is the `v1\` path segment under `.strict-cache\`, and the `.ok` marker is the commit signal —
   if it is absent, the directory is treated as a partial write and ignored. Builds only read the current schema
