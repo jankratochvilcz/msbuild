@@ -172,6 +172,7 @@ namespace Microsoft.Build.UnitTests.Shared
                 p.StandardInput.Dispose();
 
                 TimeSpan timeout = TimeSpan.FromMilliseconds(timeoutMilliseconds);
+                Stopwatch sw = Stopwatch.StartNew();
                 if (Traits.Instance.DebugUnitTests)
                 {
                     p.WaitForExit();
@@ -188,9 +189,15 @@ namespace Microsoft.Build.UnitTests.Shared
                 // See https://docs.microsoft.com/en-us/dotnet/api/system.diagnostics.process.waitforexit?view=net-6.0#system-diagnostics-process-waitforexit(system-int32).
                 // The overload WaitForExit() waits for the error and output to be handled. The WaitForExit(int timeout) overload does not, so we could lose the data.
                 p.WaitForExit();
+                sw.Stop();
 
                 pid = p.Id;
                 successfulExit = p.ExitCode == 0;
+
+                // Telemetry: log actual elapsed time so callers tuning their timeouts can see
+                // how close to the budget we ran. Used by the flaky-test-survey workflow to
+                // tighten timeout bumps in follow-up PRs.
+                WriteOutput($"Process {pid} exited in {sw.ElapsedMilliseconds}ms (budget {timeoutMilliseconds}ms, headroom {timeoutMilliseconds - sw.ElapsedMilliseconds}ms)");
             }
 
             if (attachProcessId)
