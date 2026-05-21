@@ -216,7 +216,7 @@ namespace Microsoft.Build.UnitTests
                                             ? "/C echo Main.cs(17,20): error CS0168: The variable 'foo' is declared but never used"
                                             : @"-c """"""echo Main.cs\(17,20\): error CS0168: The variable 'foo' is declared but never used""""""";
 
-            // TODO(jankratochvilcz/msbuild#39): remove diagnostics once root cause is fixed.
+            // TODO: remove diagnostics once root cause is fixed.
             // Likely-suspect: race in ToolTask's async pipe drain — Execute() may return
             // before stdout EOF, so the canonical-error parser misses the line. Confirmed
             // signal would be Errors==0 but Log contains the echoed command. Engine is
@@ -601,8 +601,8 @@ namespace Microsoft.Build.UnitTests
                                                 ? $"/C type \"{tempFile}\""
                                                 : $"-c \"cat \'{tempFile}\'\"";
 
-                // TODO(jankratochvilcz/msbuild#38): remove diagnostics once root cause is fixed.
-                // Likely-suspect: same async-pipe-drain race as #39 — Execute() returns
+                // TODO: remove diagnostics once root cause is fixed.
+                // Likely-suspect: same async-pipe-drain race seen in HandleExecutionErrorsWhenToolLogsError — Execute() returns
                 // before the cat/type output is flushed through ToolTask's stdout reader,
                 // so engine.Log only contains the cmd echo. MessageCount==0 with non-empty
                 // exit confirms truncation; MessageCount>0 with missing strings means a
@@ -1039,7 +1039,7 @@ namespace Microsoft.Build.UnitTests
             // Larger gap between fast/slow delays and the timeout to keep the test
             // robust on slow CI agents where the test process startup overhead can
             // eat into the configured budgets and cause the "slow" path to finish
-            // before the timeout fires (issue #40).
+            // before the timeout fires.
             int fastDelayMilliseconds = 100;
             int slowDelayMilliseconds = 20_000;
             int timeoutMilliseconds = 5_000;
@@ -1064,7 +1064,7 @@ namespace Microsoft.Build.UnitTests
                 bool result = task.Execute();
                 sw.Stop();
 
-                // TELEMETRY (jankratochvilcz/msbuild#40): log elapsedMs alongside the
+                // TELEMETRY: log elapsedMs alongside the
                 // configured Timeout so a follow-up PR can shrink the bumped budgets
                 // (slowDelay=20s, timeout=5s) back to tighter values once we see the
                 // actual distribution. The "slow" path uses `ping -n 21` (~20s on
