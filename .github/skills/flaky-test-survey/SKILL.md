@@ -26,9 +26,12 @@ The script acquires an Azure DevOps OAuth token via `az account get-access-token
 For every completed build in the window the script calls:
 
 1. `GET test/resultsummarybybuild` — gets total Failed count (catches retry-recovered ghost failures that don't appear in TRX).
-2. `GET test/resultdetailsbybuild?outcomes=Failed&groupBy=TestRun` — fully-qualified failed test names with error messages.
+2. `GET {vstmr}/testresults/resultsbybuild?outcomes=Failed` — fully-qualified failed test names. The classic `test/resultdetailsbybuild` endpoint silently ignores the outcome filter and strips test names, so we use the vstmr endpoint that the AzDO UI itself uses.
+3. For the top N flakes only, `GET test/Runs/{runId}/Results/{resultId}` — fetches the example error message.
 
-Then aggregates by test, computes `FailRatio = failingBuilds / totalBuilds` and `DistinctBranches`, and **filters out systematic regressions** (`FailRatio > MaxFailRatio`, default 30%). Ranked by `FailingBuilds` desc.
+All requests page on `x-ms-continuationtoken` and retry on 429 / 5xx with `Retry-After`-aware backoff.
+
+Then aggregates by test, computes `FailRatio = failingBuilds / totalBuilds` and `DistinctBranches`, and **filters out systematic regressions** (`FailRatio > MaxFailRatio`, default 30%) and **single-branch noise** (`DistinctBranches < MinDistinctBranches`, default 1; set 2 for stricter triage). Ranked by `FailingBuilds` desc.
 
 Ghost-failure builds (where AzDO summary > extracted TRX names) are listed separately — those need manual UI inspection because the test runner retried and the pass overwrites the failure in the result store.
 
@@ -82,7 +85,8 @@ If the failure mode is unclear, open a telemetry-only PR (no behavior change) an
 | `-Project`       | `public`           |                                                         |
 | `-Days`          | 7                  | Look-back window                                        |
 | `-MaxFailRatio`  | 0.30               | Above this, treat as systematic regression, not flake   |
-| `-TopCount`     | 20                 | Cap on the printed table                                |
+| `-MinDistinctBranches` | 1            | Set 2 for stricter "must span multiple PRs" triage      |
+| `-TopCount`      | 20                 | Cap on the printed table                                |
 | `-JsonOutPath`   | (none)             | Optional JSON dump for downstream automation            |
 
 ## Caveats
