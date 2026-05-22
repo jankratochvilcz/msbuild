@@ -262,6 +262,16 @@ gh project item-edit `
 
 The board status should always match reality. If you've written the test but haven't opened a PR, the item stays in **In Progress**.
 
+## Adjacent work that lives on the same board
+
+The "Customer Patterns Code Coverage" board is also the home for other **personal-triage tickets the contributor is tracking against MSBuild** — most commonly **flaky-test follow-ups** discovered while scanning upstream CI. The same "in the fork, on the board" rule applies:
+
+1. **File the issue in `jankratochvilcz/msbuild`**, not `dotnet/msbuild`. Body: symptom, exact failing build link, suspected location (file + class + method), root-cause hypothesis, suggested fix, reproduction sketch — same template depth as a guard-test ticket.
+2. **Label** with `flaky-test` (the upstream repo's label; mirror it in the fork). For guard-test tickets, use `[Guard test]` title prefix; for flaky-test tickets, use `Flaky test:` title prefix.
+3. **Add to the project board** via `gh project item-add 2 --owner jankratochvilcz --url <url>` (lands in Todo).
+4. **If you discovered the flake by scanning `dotnet/msbuild` CI** and accidentally filed in the upstream repo first, close the upstream issue with a one-line comment redirecting to the fork issue. Do not lose the upstream reference — paste the upstream build/run links into the fork issue body.
+5. **Adding more evidence to an existing upstream flaky-test issue** (e.g., a second test hitting the same root cause) **is fine to do directly upstream as a comment** — that is sharing data, not filing a new tracker.
+
 ## Closing the loop on the epic
 
 When all initial guard-test tickets generated in the first run are Done, comment on the epic (#31) summarizing what was added, link the merged commits, and propose the next survey target.
