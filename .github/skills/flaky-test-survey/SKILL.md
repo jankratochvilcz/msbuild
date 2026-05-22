@@ -43,11 +43,107 @@ pwsh .github/skills/flaky-test-survey/Find-FlakyTests.ps1
 
 # Wider window, save JSON for automation (issue filing)
 pwsh .github/skills/flaky-test-survey/Find-FlakyTests.ps1 -Days 14 -JsonOutPath flakes.json -TopCount 25
+
+# Skip tests already tracked, emit one issue-body draft per remaining top flake
+pwsh .github/skills/flaky-test-survey/Find-FlakyTests.ps1 `
+    -ExcludeTestsFile .github/skills/flaky-test-survey/known-flakes.txt `
+    -IssueDraftDir ./out/flake-drafts
+```
+
+`-ExcludeTestsFile` is a plain-text list (one fully-qualified test name per line, `#` comments allowed) of flakes already on the board or already fixed-but-cooling. Curate it as you triage so the next run focuses on genuinely new noise.
+
+`-IssueDraftDir` writes one `<short-name>.md` per top flake using the issue-body template below. Review each draft, then file with:
+
+```powershell
+gh issue create --repo jankratochvilcz/msbuild --label flaky-test `
+    --title "Flaky test: <name>" --body-file ./out/flake-drafts/<file>.md
 ```
 
 ## Weekly Cadence
 
-Run on Monday morning, file/refresh issues for the top N flakes, link the build IDs in the issue body.
+Run on Monday morning. For each top flake **not in the exclusion list**:
+
+1. Search `dotnet/msbuild` for an existing tracker by test name (de-dup; see below).
+2. If untracked, file in the fork and add to the project board.
+3. If tracked upstream and the failure looks like the *same* root cause, **comment on the upstream tracker** with the new evidence — do not file a duplicate.
+4. Append the test name to `known-flakes.txt` once a tracker exists, so the next run skips it.
+
+## Where to file: fork, not upstream
+
+All personal-triage flake trackers live in `jankratochvilcz/msbuild` on the **"Customer Patterns Code Coverage"** project board (`jankratochvilcz/projects/2`). Upstream `dotnet/msbuild` already has its own flaky-test tracking workflow — filing personal-triage tickets there creates noise and duplicates.
+
+Rules:
+
+- **File in `jankratochvilcz/msbuild`** with the `flaky-test` label and title prefix `Flaky test:`.
+- **Add to the board** so it shows up alongside the guard-test work:
+  ```powershell
+  gh project item-add 2 --owner jankratochvilcz --url <issue-url>
+  ```
+  (lands in Todo by default).
+- **If you mistakenly filed upstream first**, close the upstream issue with a one-line redirect comment to the fork copy. Do not lose the upstream build links — paste them into the fork issue body.
+- **Adding more evidence to an existing upstream tracker** (e.g., a second test hitting the same root cause) is fine to do as a comment on the upstream issue — that is sharing data, not filing a new tracker.
+
+## De-dup against upstream before filing
+
+Before filing a new tracker, search `dotnet/msbuild` for the test name and any obvious symptom strings from the error message:
+
+```powershell
+gh search issues "<TestName>" --repo dotnet/msbuild --json number,title,state,assignees
+```
+
+Common outcomes:
+
+- **Already tracked, assigned, open** → skip, just add the test to your `known-flakes.txt`.
+- **Tracked, but the failure here is a *different* symptom of the same root cause** → comment on the upstream tracker linking your build and noting the additional symptom. Then add the new test name to `known-flakes.txt`.
+- **No tracker** → file in the fork.
+
+The same de-dup applies inside the fork itself — search before filing.
+
+## Issue body template
+
+Every flaky-test tracker (fork or otherwise) follows this shape. The script's `-IssueDraftDir` pre-fills it for you; you fill in the blanks marked `<...>`.
+
+```markdown
+## Symptom
+
+`<FullyQualifiedTestName>` failed on `main` (build [<id>](<url>), `<job name>`, <yyyy-mm-dd>):
+
+<paste the error message verbatim, fenced as a code block>
+
+## Where
+
+- `<source/path/to/Test.cs>` — test `<TestName>`
+- `<source/path/to/Production.cs>` — `<Class.Method>` that the test exercises
+
+## Likely cause
+
+<2-4 sentence hypothesis. Identify the race, missing sync, timing assumption, or environment dependency. If you cannot identify a cause, say so explicitly and propose telemetry-only as the next step.>
+
+## Frequency
+
+First observed in <N>h scan window (<X> of <Y> recent main builds). Tracking here to gather more data; if it recurs >1×/week, stabilize.
+
+## Suggested next step
+
+<One of: fix (only if confident), bump-timeout-with-telemetry, telemetry-only.>
+
+## How to reproduce
+
+<Concrete repro command, or "Cannot reproduce locally; only on busy CI agents" with the conditions known to amplify it.>
+```
+
+## Multiple symptoms, one root cause
+
+If two tests fail with assertions that match the same root cause (e.g., last-line-of-stdout assertions both hitting an `AsyncStreamReader` flush race), **do not file two trackers**. Comment on the existing root-cause tracker with the second test's evidence, and add that test to the acceptance-criteria list for the eventual fix. This keeps the tracker count honest and gives the fix author a richer acceptance gate.
+
+## Follow-up "shrink" PRs stay draft until data accumulates
+
+When mitigating with a timeout bump (per the rules below), a follow-up PR to **shrink the budget back** once telemetry confirms a tight-but-safe value is the second half of the contract. Those follow-up PRs:
+
+- Open as **draft**, not ready-for-review.
+- Cite the elapsed-time distribution observed since the bump merged (use `Find-FlakyTests.ps1` plus the test's `Stopwatch` telemetry).
+- Stay draft until **at least one full cycle (typically 3-7 days) of clean main + PR data** confirms the new budget. A clean 24-hour window is not enough — flake rates below ~1% will not surface in 20 runs.
+- When marking ready, post a comment on the original mitigation PR linking the shrink PR with the supporting data.
 
 ## Workflow: Diagnose → Mitigate → Iterate
 
@@ -88,6 +184,8 @@ If the failure mode is unclear, open a telemetry-only PR (no behavior change) an
 | `-MinDistinctBranches` | 1            | Set 2 for stricter "must span multiple PRs" triage      |
 | `-TopCount`      | 20                 | Cap on the printed table                                |
 | `-JsonOutPath`   | (none)             | Optional JSON dump for downstream automation            |
+| `-ExcludeTestsFile` | (none)          | Text file of test names to suppress (one per line, `#` comments) |
+| `-IssueDraftDir` | (none)             | If set, write one issue-body markdown draft per top flake here |
 
 ## Caveats
 

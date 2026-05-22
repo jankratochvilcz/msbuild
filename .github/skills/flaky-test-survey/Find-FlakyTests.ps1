@@ -42,6 +42,18 @@
 .PARAMETER TopCount
     Show only the top N flakes. Default 20.
 
+.PARAMETER ExcludeTestsFile
+    Optional file with fully-qualified test names to suppress from the report,
+    one per line. Lines starting with '#' are comments. Use this to skip flakes
+    that already have a tracker so the report focuses on new noise.
+
+.PARAMETER IssueDraftDir
+    Optional directory. If set, the script writes one issue-body markdown draft
+    per top flake there, using the template documented in SKILL.md. Review and
+    file with:
+        gh issue create --repo jankratochvilcz/msbuild --label flaky-test \
+            --title "Flaky test: <name>" --body-file <draft.md>
+
 .EXAMPLE
     pwsh ./Find-FlakyTests.ps1 -Days 7 -JsonOutPath flakes.json -TopCount 25
 #>
@@ -54,10 +66,31 @@ param(
     [string]$JsonOutPath,
     [double]$MaxFailRatio = 0.30,
     [int]$MinDistinctBranches = 1,
-    [int]$TopCount = 20
+    [int]$TopCount = 20,
+    [string]$ExcludeTestsFile,
+    [string]$IssueDraftDir
 )
 
 $ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Web
+
+# ----- Load exclusion list -----
+$excluded = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+if ($ExcludeTestsFile) {
+    if (-not (Test-Path $ExcludeTestsFile)) {
+        throw "ExcludeTestsFile not found: $ExcludeTestsFile"
+    }
+    Get-Content $ExcludeTestsFile |
+        ForEach-Object { ($_ -replace '#.*$', '').Trim() } |
+        Where-Object { $_ } |
+        ForEach-Object { [void]$excluded.Add($_) }
+    Write-Host "Excluding $($excluded.Count) test(s) from $ExcludeTestsFile."
+}
+
+function Get-BuildUrl {
+    param([int]$BuildId)
+    return "https://dev.azure.com/$Organization/$Project/_build/results?buildId=$BuildId"
+}
 
 # ----- Auth -----
 $azdoResource = '499b84ac-1321-427f-aa17-267ca6975798'
@@ -227,6 +260,7 @@ $flakes = foreach ($g in $byTest) {
         FailRatio          = [Math]::Round($failingFraction, 3)
         TotalFailRecords   = [int]$records.Count
         ExampleBuildIds    = @($distinctBuilds | Select-Object -First 5)
+        ExampleBuildUrls   = @($distinctBuilds | Select-Object -First 5 | ForEach-Object { Get-BuildUrl $_ })
         FirstSeen          = ($records | Sort-Object started | Select-Object -First 1).started
         LastSeen           = ($records | Sort-Object started -Descending | Select-Object -First 1).started
         ExampleError       = $null
@@ -237,6 +271,7 @@ $flakes = foreach ($g in $byTest) {
 $ranked = $flakes |
     Where-Object { $_.FailRatio -le $MaxFailRatio } |
     Where-Object { $_.DistinctBranches -ge $MinDistinctBranches } |
+    Where-Object { -not $excluded.Contains($_.Test) } |
     Sort-Object @{Expression='FailingBuilds';Descending=$true},
                 @{Expression='DistinctBranches';Descending=$true}
 
@@ -273,6 +308,55 @@ if ($JsonOutPath) {
     $top | ConvertTo-Json -Depth 5 | Set-Content -Path $JsonOutPath -Encoding UTF8
     Write-Host ""
     Write-Host "JSON written: $JsonOutPath"
+}
+
+# ----- Optional: emit an issue-body draft per top flake -----
+if ($IssueDraftDir) {
+    if (-not (Test-Path $IssueDraftDir)) {
+        New-Item -ItemType Directory -Path $IssueDraftDir | Out-Null
+    }
+    Write-Host ""
+    Write-Host "Writing issue-body drafts to $IssueDraftDir ..."
+    foreach ($t in $top) {
+        # Short, filesystem-safe filename from the last segment of the test FQN.
+        $leaf = ($t.Test -split '\.')[-1] -replace '[^\w\-]', '_'
+        $path = Join-Path $IssueDraftDir ("{0}.md" -f $leaf)
+        $url  = if ($t.ExampleBuildUrls.Count -gt 0) { $t.ExampleBuildUrls[0] } else { '' }
+        $bid  = if ($t.ExampleBuildIds.Count -gt 0) { $t.ExampleBuildIds[0] } else { '' }
+        $err  = if ($t.ExampleError) { $t.ExampleError } else { '<paste failure message verbatim from the build link above>' }
+        $body = @"
+## Symptom
+
+``$($t.Test)`` failed on ``main`` ($($t.FailingBuilds) of $totalBuilds recent main builds, $($t.DistinctBranches) distinct branches). Example: [build $bid]($url) (assembly ``$($t.Assembly)``, last seen $($t.LastSeen)).
+
+``````
+$err
+``````
+
+## Where
+
+- ``<source/path/to/Test.cs>`` — test ``$($t.Test.Split('.')[-1])``
+- ``<source/path/to/Production.cs>`` — ``<Class.Method>`` that the test exercises
+
+## Likely cause
+
+<2-4 sentence hypothesis. Identify the race, missing sync, timing assumption, or environment dependency. If you cannot identify a cause, say so explicitly and propose telemetry-only as the next step.>
+
+## Frequency
+
+$($t.FailingBuilds) of $totalBuilds recent main builds in the last $Days days; FailRatio = $($t.FailRatio); spans $($t.DistinctBranches) branch(es). Example builds: $((($t.ExampleBuildUrls) | ForEach-Object { "[$([System.Web.HttpUtility]::ParseQueryString(([uri]$_).Query)['buildId'])]($_)"  }) -join ', ').
+
+## Suggested next step
+
+<One of: fix (only if confident), bump-timeout-with-telemetry, telemetry-only.>
+
+## How to reproduce
+
+<Concrete repro command, or "Cannot reproduce locally; only on busy CI agents" with the conditions known to amplify it.>
+"@
+        Set-Content -Path $path -Value $body -Encoding UTF8
+    }
+    Write-Host "  $($top.Count) draft(s) written."
 }
 
 # Ghost flake report: builds where AzDO summary count > what we extracted in TRX
