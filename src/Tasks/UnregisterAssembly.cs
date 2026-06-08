@@ -30,6 +30,7 @@ namespace Microsoft.Build.Tasks
     /// Registers a managed assembly for COM interop (equivalent of regasm.exe functionality, but this code
     /// doesn't actually call the exe).
     /// </summary>
+    [Microsoft.Build.Framework.MSBuildMultiThreadableTask]
     public class UnregisterAssembly : AppDomainIsolatedTaskExtension, IUnregisterAssemblyTaskContract
     {
         #region Properties
