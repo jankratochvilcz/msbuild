@@ -74,9 +74,83 @@ done
 Use the binlog MCP `binlog_expensive_tasks` / `binlog_task_details` to extract the per-call
 RAR breakdown and compare cache hits/misses.
 
+## Findings — code audit of `SystemState`
+
+Reviewed `src/Tasks/SystemState.cs` and the `StateFile` region in
+`src/Tasks/AssemblyDependency/ResolveAssemblyReference.cs`. Three caches coexist:
+
+| Cache | Lifetime | Reset on rebuild? |
+|---|---|---|
+| `upToDateLocalFileStateCache` | per-`RAR.Execute` instance | yes (new instance per call) |
+| `instanceLocalFileStateCache` | per-`RAR.Execute` instance, deserialized from `<proj>.csproj.AssemblyReference.cache` | **yes — obj is wiped on rebuild → `DeserializeCache` returns null → empty dictionary** |
+| `s_processWideFileStateCache` | `static ConcurrentDictionary<string, FileState>` — per host process | no (survives across task calls within the same MSBuild process) |
+
+The shared static `s_processWideFileStateCache` already gives every in-proc RAR
+call full cross-invocation reuse of resolved `FileState` (assembly name, runtime
+version, dependencies). Concurrent access is `ConcurrentDictionary`-safe, and
+per-`FileState` lazy population is serialized by `FileState._lock`. No
+thread-static fields, no `cwd`-relative cache keys, no `FileSystemWatcher`
+handles — the cache-lifetime / thread-affinity hypothesis does not hold.
+
+### Why this rules out `SystemState` as the root cause of `console-rebuild` +95%
+
+- `console-rebuild` is a **single-project clean rebuild**: obj is wiped, so the
+  per-project state file is missing → instance cache is empty for both MT and
+  non-MT. There is only **one RAR call**, so `s_processWideFileStateCache` is
+  also empty at the start. Both modes pay the *same* cold cache population
+  cost. A cache-lifetime regression would require either (a) multiple RAR
+  calls within the same process where MT loses sharing relative to non-MT, or
+  (b) the MT path bypassing `s_processWideFileStateCache`. Neither is the case.
+- The only RAR pathway that differs by mode is `OutOfProcRarClient`
+  (RAR-as-a-service, gated by `MSBuildRarNode`) which is *disabled* under MT
+  via an early `throw new NotSupportedException` in `RAR.Execute`. This path
+  is **off by default** (env var unset in perfstar), so it cannot explain the
+  baseline +95%. If perfstar ever enables `MSBuildRarNode`, the early throw
+  will surface — file a follow-up to either gracefully fall back to in-proc or
+  make `OutOfProcRarClient` MT-safe (the pipe-pooling work referenced in the
+  comment at `ResolveAssemblyReference.cs:3417`).
+
+### Where the per-call regression most likely lives
+
+RAR is dominated by per-input ITaskItem path work. Under Wave 18.8,
+`MakeAbsolutePath` / `MakeCanonicalPath` route every `AssemblyFiles`,
+`Assemblies`, `SearchPaths`, and `InstalledAssemblyTables` path through
+`TaskEnvironment.GetAbsolutePath(...).GetCanonicalFormNoThrow(...)`. That
+adds an O(inputs) overhead on every Execute that is **paid identically on
+rebuild and incremental**, and is the same hot path called out by:
+
+- **#59 / PR #69** — `AbsolutePath.GetCanonicalForm` Windows case-folding
+- **#57 / PR #68** — migrated-but-regressing tasks with many ITaskItem inputs
+- **#61 / PR #71** — intrinsic task re-entrancy / TaskExecutionHost dispatch
+
+A `console-rebuild` RAR call touches ~200 framework + transitive assembly
+paths; even a few µs per path of extra canonicalization plus MT-side
+TaskExecutionHost setter dispatch is consistent with the observed
+63 → 123 ms delta.
+
+## Conclusion — close as "not a cache problem"
+
+- `SystemState` is **not** the source of the +95% `console-rebuild`
+  regression. The shared static `s_processWideFileStateCache` already gives
+  the in-proc MT scheduler full cross-call reuse; clean rebuild makes both
+  modes start cold; there are no thread-affinity bugs in the cache code.
+- No `SystemState` fix is shipped from this PR. The investigation is
+  redirected to the active follow-ups (#59 canonicalization, #57 setter
+  marshalling, #61 intrinsic-task re-entrancy) which share the same hot path.
+- If multi-project MT scenarios later regress on RAR specifically (rather
+  than the cross-cutting per-input overhead above), reopen with the
+  hypothesis that one of: `redistList` (per-instance, reloaded every call,
+  not static), `InstalledAssemblyTableInfo` parsing, or `app.config`
+  remapping is the next narrowed suspect.
+
 ## Expected outcome
 
 - Confirmed source of the +95% regression on `console-rebuild`.
 - If cache-lifetime issue: a PR that extends `SystemState` lifetime across the MT
   node-handoff, restoring Δ < +20%.
 - If downstream: a follow-up issue with the next narrowed hypothesis.
+
+**Actual outcome:** cache-lifetime ruled out by code audit (see *Findings*
+above). Regression is redirected to the per-input path canonicalization /
+TaskExecutionHost dispatch hot path tracked under #59 / #57 / #61. No
+`SystemState` change is needed.
