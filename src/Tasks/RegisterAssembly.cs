@@ -28,6 +28,7 @@ namespace Microsoft.Build.Tasks
     /// Registers a managed assembly for COM interop (equivalent of regasm.exe functionality, but this code doesn't actually call the exe).
     /// </summary>
     /// <comment>ITypeLibExporterNotifySink is necessary for the ITypeLibConverter.ConvertAssemblyToTypeLib call.</comment>
+    [Microsoft.Build.Framework.MSBuildMultiThreadableTask]
     public class RegisterAssembly : AppDomainIsolatedTaskExtension, ITypeLibExporterNotifySink, IRegisterAssemblyTaskContract
     {
         #region Properties
