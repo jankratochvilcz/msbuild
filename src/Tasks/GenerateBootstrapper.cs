@@ -19,6 +19,7 @@ namespace Microsoft.Build.Tasks
     /// <summary>
     /// Generates a bootstrapper for ClickOnce deployment projects.
     /// </summary>
+    [Microsoft.Build.Framework.MSBuildMultiThreadableTask]
     public sealed class GenerateBootstrapper : TaskExtension, IGenerateBootstrapperTaskContract
     {
         public string ApplicationName { get; set; }
