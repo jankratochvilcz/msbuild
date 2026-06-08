@@ -61,7 +61,12 @@ namespace Microsoft.Build.BackEnd
         /// </summary>
         /// <param name="taskType">The task type to check.</param>
         /// <returns>True if the task has the attribute; false otherwise.</returns>
-        private static bool HasMultiThreadableTaskAttribute(Type taskType)
+        /// <remarks>
+        /// Exposed as internal so callers like TaskBuilder can gate per-task work
+        /// (e.g. assignments to TaskEnvironment) that is only meaningful to
+        /// multi-threadable tasks. Keeps the reflection cache centralized here.
+        /// </remarks>
+        internal static bool HasMultiThreadableTaskAttribute(Type taskType)
         {
             return s_multiThreadableTaskCache.GetOrAdd(
                 taskType,
