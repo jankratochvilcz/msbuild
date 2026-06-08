@@ -86,3 +86,36 @@ the residual is unavoidable per-call infrastructure cost, with a written justifi
 
 Aggregated target: ~400 ms per build across the console scenarios / 15-20% of the MT
 regression on net8-console-app.
+
+## Findings
+
+Investigation completed.
+
+1. **All three target tasks are already migrated upstream** (verified against `dotnet/sdk@main`,
+   `src/Tasks/Microsoft.NET.Build.Tasks/`): `GetPackageDirectory.cs`, `GenerateDepsFile.cs`, and
+   `GenerateRuntimeConfigurationFiles.cs` all carry the `[MSBuildMultiThreadableTask]` attribute
+   (merged via dotnet/sdk#54444 and dotnet/sdk#53950 plus follow-ups). The sidecar TaskHost
+   routing cost is therefore no longer paid for these three tasks.
+
+2. **Residual per-task regression is engine-side**, not in the task bodies themselves. The
+   A/B traces underpinning #58 (`exec-58-widen`) and the deeper analysis in #67 show the
+   remaining MT cost concentrates in `TaskBuilder` per-invocation setup — specifically the
+   `AsyncLocal` propagation behind `FileUtilities.CurrentThreadWorkingDirectory` and the
+   per-task `TaskEnvironment` lifecycle in `MultiThreadedTaskEnvironmentDriver`. Migration
+   alone (the attribute) skips the sidecar but does not change those code paths, so a short
+   task like `GetPackageDirectory` (≈17 ms baseline) sees the fixed per-call overhead as a
+   large relative regression even though absolute Δ is small.
+
+3. **No new bootstrap-vs-SDK micro-benchmark was run** for this investigation: the
+   `artifacts/bin/bootstrap/core/dotnet` SDK shipped with the local MSBuild build is older
+   than `dotnet/sdk@main`, so it does not yet carry the migrated tasks. Re-running the bench
+   here would only re-measure the unmigrated path; the meaningful next measurement is the
+   one performed in #67 against the engine-side fix.
+
+## Conclusion
+
+This issue is effectively **blocked by #67**. The per-task migration work for the three
+tasks named in the title is already done upstream; what remains is the engine-side
+`TaskBuilder` / `MultiThreadedTaskEnvironmentDriver` cost, which is the scope of #67. Once
+#67 lands an engine-side fix, the perfstar numbers for these three tasks should fall back in
+line and #57 can close without a per-task code change in this PR.
