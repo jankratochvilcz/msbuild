@@ -19,6 +19,7 @@ namespace Microsoft.Build.Tasks
     /// backwards compatibility in case a third-party task derives from it; it should not be used.
     /// </remarks>
     [RunInMTA]
+    [Microsoft.Build.Framework.MSBuildMultiThreadableTask]
     public class CallTarget : TaskExtension
     {
         #region Properties
