@@ -451,15 +451,24 @@ namespace Microsoft.Build.BackEnd
                         // In multi-threaded mode, the ProjectDirectory setter writes to an AsyncLocal in
                         // MultiThreadedTaskEnvironmentDriver, which is expensive (per-call ExecutionContext
                         // propagation). Only tasks that actually consume TaskEnvironment can observe the
-                        // value, so gate the assignment on whether the task type implements
+                        // value, so in MT mode we gate the assignment on whether the task type implements
                         // IMultiThreadableTask or carries [MSBuildMultiThreadableTask]. Falls back to the
                         // original unconditional behavior when the task type can't be determined, to avoid
                         // regressing correctness.
-                        Type taskType = taskFactoryWrapper?.TaskFactoryLoadedType?.Type;
-                        bool taskNeedsProjectDirectory =
-                            taskType == null
-                            || typeof(IMultiThreadableTask).IsAssignableFrom(taskType)
-                            || TaskRouter.HasMultiThreadableTaskAttribute(taskType);
+                        //
+                        // In legacy (non-MT) mode the setter calls NativeMethods.SetCurrentDirectory on
+                        // MultiProcessTaskEnvironmentDriver — an actual process CWD change that legacy
+                        // tasks (the vast majority of which are not marked as multi-threadable) may
+                        // depend on. We MUST preserve the original unconditional behavior there.
+                        bool taskNeedsProjectDirectory = true;
+                        if (_componentHost.BuildParameters.MultiThreaded)
+                        {
+                            Type taskType = taskFactoryWrapper?.TaskFactoryLoadedType?.Type;
+                            taskNeedsProjectDirectory =
+                                taskType == null
+                                || typeof(IMultiThreadableTask).IsAssignableFrom(taskType)
+                                || TaskRouter.HasMultiThreadableTaskAttribute(taskType);
+                        }
 
                         if (taskNeedsProjectDirectory)
                         {
