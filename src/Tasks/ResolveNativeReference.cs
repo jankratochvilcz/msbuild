@@ -28,6 +28,7 @@ namespace Microsoft.Build.Tasks
     /// <summary>
     /// Main class for the native reference resolution task.
     /// </summary>
+    [Microsoft.Build.Framework.MSBuildMultiThreadableTask]
     public class ResolveNativeReference : TaskExtension, IResolveNativeReferenceTaskConract
     {
         #region Constructors
