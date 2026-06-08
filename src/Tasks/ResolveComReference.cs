@@ -140,6 +140,7 @@ namespace Microsoft.Build.Tasks
     /// <summary>
     /// Main class for the COM reference resolution task for .NET Core
     /// </summary>
+    [Microsoft.Build.Framework.MSBuildMultiThreadableTask]
     public sealed partial class ResolveComReference : TaskRequiresFramework, IResolveComReferenceTaskContract
     {
         public ResolveComReference()
