@@ -434,21 +434,47 @@ namespace Microsoft.Build.BackEnd
             }
             else
             {
-                if (_componentHost.BuildParameters.SaveOperatingEnvironment)
-                {
-                    // Change to the project root directory.
-                    // If that directory does not exist, do nothing. (Do not check first as it is almost always there and it is slow)
-                    // This is because if the project has not been saved, this directory may not exist, yet it is often useful to still be able to build the project.
-                    // No errors are masked by doing this: errors loading the project from disk are reported at load time, if necessary.
-                    _buildRequestEntry.TaskEnvironment.ProjectDirectory = new AbsolutePath(_buildRequestEntry.ProjectRootDirectory, ignoreRootedCheck: true);
-                }
-
                 if (howToExecuteTask == TaskExecutionMode.ExecuteTaskAndGatherOutputs)
                 {
                     // We need to find the task before logging the task started event so that the using task statement comes before the task started event
                     TaskHostParameters taskIdentityParameters = GatherTaskIdentityParameters(bucket.Expander);
                     (TaskRequirements? requirements, TaskFactoryWrapper taskFactoryWrapper) = _taskExecutionHost.FindTask(taskIdentityParameters);
                     string taskAssemblyLocation = taskFactoryWrapper?.TaskFactoryLoadedType?.Path;
+
+                    if (_componentHost.BuildParameters.SaveOperatingEnvironment)
+                    {
+                        // Change to the project root directory.
+                        // If that directory does not exist, do nothing. (Do not check first as it is almost always there and it is slow)
+                        // This is because if the project has not been saved, this directory may not exist, yet it is often useful to still be able to build the project.
+                        // No errors are masked by doing this: errors loading the project from disk are reported at load time, if necessary.
+                        //
+                        // In multi-threaded mode, the ProjectDirectory setter writes to an AsyncLocal in
+                        // MultiThreadedTaskEnvironmentDriver, which is expensive (per-call ExecutionContext
+                        // propagation). Only tasks that actually consume TaskEnvironment can observe the
+                        // value, so in MT mode we gate the assignment on whether the task type implements
+                        // IMultiThreadableTask or carries [MSBuildMultiThreadableTask]. Falls back to the
+                        // original unconditional behavior when the task type can't be determined, to avoid
+                        // regressing correctness.
+                        //
+                        // In legacy (non-MT) mode the setter calls NativeMethods.SetCurrentDirectory on
+                        // MultiProcessTaskEnvironmentDriver — an actual process CWD change that legacy
+                        // tasks (the vast majority of which are not marked as multi-threadable) may
+                        // depend on. We MUST preserve the original unconditional behavior there.
+                        bool taskNeedsProjectDirectory = true;
+                        if (_componentHost.BuildParameters.MultiThreaded)
+                        {
+                            Type taskType = taskFactoryWrapper?.TaskFactoryLoadedType?.Type;
+                            taskNeedsProjectDirectory =
+                                taskType == null
+                                || typeof(IMultiThreadableTask).IsAssignableFrom(taskType)
+                                || TaskRouter.HasMultiThreadableTaskAttribute(taskType);
+                        }
+
+                        if (taskNeedsProjectDirectory)
+                        {
+                            _buildRequestEntry.TaskEnvironment.ProjectDirectory = new AbsolutePath(_buildRequestEntry.ProjectRootDirectory, ignoreRootedCheck: true);
+                        }
+                    }
 
                     if (requirements != null)
                     {
@@ -525,6 +551,14 @@ namespace Microsoft.Build.BackEnd
                 else
                 {
                     Assumed.Equal(howToExecuteTask, TaskExecutionMode.InferOutputsOnly, "should be inferring");
+
+                    if (_componentHost.BuildParameters.SaveOperatingEnvironment)
+                    {
+                        // InferOutputs does not actually execute the task, but preserve the original
+                        // behavior of setting ProjectDirectory unconditionally here for correctness.
+                        // The MT AsyncLocal hot-path concern is in the ExecuteTaskAndGatherOutputs branch above.
+                        _buildRequestEntry.TaskEnvironment.ProjectDirectory = new AbsolutePath(_buildRequestEntry.ProjectRootDirectory, ignoreRootedCheck: true);
+                    }
 
                     Assumed.True(GatherTaskOutputs(null, howToExecuteTask, bucket), "The method GatherTaskOutputs() should never fail when inferring task outputs.");
 
