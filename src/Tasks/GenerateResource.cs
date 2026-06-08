@@ -53,6 +53,7 @@ namespace Microsoft.Build.Tasks
     /// to transform resource files.
     /// </summary>
     [RequiredRuntime("v2.0")]
+    [Microsoft.Build.Framework.MSBuildMultiThreadableTask]
     public sealed partial class GenerateResource : TaskExtension, IIncrementalTask
     {
 
