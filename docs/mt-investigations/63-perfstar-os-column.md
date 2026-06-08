@@ -101,3 +101,19 @@ investigations are bottlenecked on proxy heuristics.
 Once the schema change is implemented, the real PR will be opened against the Azure DevOps
 `dotnet-perfstar` repo (DevDiv organization). This GitHub PR remains as the public
 planning record so the issue has a linked tracking artifact.
+
+## Implementation landed
+
+The schema + ingestion change is committed in the ADO `dotnet-perfstar` repo:
+
+- Branch: `mt/add-os-column` (https://devdiv.visualstudio.com/DevDiv/_git/dotnet-perfstar?version=GBmt/add-os-column)
+- Commit `d1a3e9d`: `scenario_metrics`: add `os` discriminator column.
+- Commit `bb258de`: extend `os` to `task_runs`, `target_runs`, `project_runs`, `project_evaluations`; thread through `BinlogComparer.CollectAnalytics → CollectBinlogRows`; update `task_wallclock`, `target_wallclock`, `eval_pass`, `level1`, `concurrency_timeline`, `node_timeline` views to group by `os`.
+
+Files touched in dotnet-perfstar:
+
+- `src/RunResultsProcessor/KustoSchema.kql` — `.alter-merge` adds `os: string` to each affected table.
+- `src/RunResultsProcessor/Kusto/AnalyticsData.cs` — `Os` property on `TaskRunRow`, `TargetRunRow`, `ProjectRunRow`, `ProjectEvaluationRow`, `ScenarioMetricRow`.
+- `src/RunResultsProcessor/Binlog/BinlogComparer.cs` — `os` extracted from the scenario key via `ExtractOs` and passed into every row constructor.
+
+Verified locally: `dotnet build PerformanceTests.sln -c Release` succeeds; `RunResultsProcessor.Tests` 7/7 pass.
