@@ -19,6 +19,7 @@ namespace Microsoft.Build.Tasks
     /// RequestBuilder which spawned them.
     /// </remarks>
     [RunInMTA]
+    [Microsoft.Build.Framework.MSBuildMultiThreadableTask]
     public class MSBuild : TaskExtension
     {
         /// <summary>
