@@ -1094,7 +1094,7 @@ namespace Microsoft.Build.UnitTests.Logging
             ((IBuildComponent)loggingService).InitializeComponent(mockHost);
             loggingService.RegisterLogger(new ConsoleLogger());
 
-            // Shut down the service, which will null out _eventQueue, _dequeueEvent, _enqueueEvent.
+            // Shut down the service, which will null out _eventChannel and associated state.
             ((IBuildComponent)loggingService).ShutdownComponent();
             loggingService.ServiceState.ShouldBe(LoggingServiceState.Shutdown);
 

@@ -8,6 +8,8 @@ using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using System.Threading;
+using System.Threading.Channels;
+using System.Threading.Tasks;
 using Microsoft.Build.BackEnd.Components.RequestBuilder;
 using Microsoft.Build.Experimental.BuildCheck;
 using Microsoft.Build.Experimental.BuildCheck.Infrastructure;
@@ -251,14 +253,13 @@ namespace Microsoft.Build.BackEnd.Logging
         #region LoggingThread Data
 
         /// <summary>
-        /// Queue for asynchronous event processing.
+        /// Channel used for asynchronous event processing. Replaces the previous
+        /// ConcurrentQueue + AutoResetEvent pair; backpressure is provided by
+        /// the bounded channel's <see cref="BoundedChannelFullMode.Wait"/> mode
+        /// and ordering is preserved by a single reader. This is the foundation
+        /// for a future multi-drain sharded pipeline (see msbuild#62).
         /// </summary>
-        private ConcurrentQueue<object> _eventQueue;
-
-        /// <summary>
-        /// Event set when message is consumed from queue.
-        /// </summary>
-        private AutoResetEvent _dequeueEvent;
+        private Channel<object> _eventChannel;
 
         /// <summary>
         /// Event set when queue become empty.
@@ -266,17 +267,12 @@ namespace Microsoft.Build.BackEnd.Logging
         private ManualResetEvent _emptyQueueEvent;
 
         /// <summary>
-        /// Event set when message is added into queue.
-        /// </summary>
-        private AutoResetEvent _enqueueEvent;
-
-        /// <summary>
         /// CTS for stopping logging event processing.
         /// </summary>
         private CancellationTokenSource _loggingEventProcessingCancellation;
 
         /// <summary>
-        /// Task which pump/process messages from <see cref="_eventQueue"/>
+        /// Task which pump/process messages from <see cref="_eventChannel"/>
         /// </summary>
         private Thread _loggingEventProcessingThread;
 
@@ -518,7 +514,7 @@ namespace Microsoft.Build.BackEnd.Logging
         /// Used for hang diagnostics to determine if the logging pipeline is backed up.
         /// Returns 0 for synchronous logging or when the queue is not available.
         /// </summary>
-        public int EventQueueCount => _eventQueue?.Count ?? 0;
+        public int EventQueueCount => _eventChannel?.Reader.Count ?? 0;
 
         /// <summary>
         /// Get of warnings to treat as errors.  An empty non-null set will treat all warnings as errors.
@@ -1301,35 +1297,37 @@ namespace Microsoft.Build.BackEnd.Logging
             Assumed.NotNull(buildEvent, "buildEvent is null");
             if (_logMode == LoggerMode.Asynchronous)
             {
-                // Capture local references to prevent race with CleanLoggingEventProcessing
-                // which sets these fields to null during shutdown.
-                ConcurrentQueue<object> eventQueue = _eventQueue;
-                AutoResetEvent dequeueEvent = _dequeueEvent;
-                AutoResetEvent enqueueEvent = _enqueueEvent;
+                // Capture local reference to prevent race with CleanLoggingEventProcessing
+                // which sets this field to null during shutdown.
+                Channel<object> eventChannel = _eventChannel;
 
-                // Double-check after capturing references in case shutdown raced between
-                // the _serviceState check above and the field reads.
-                if (eventQueue == null || dequeueEvent == null || enqueueEvent == null)
+                // Double-check after capturing reference in case shutdown raced between
+                // the _serviceState check above and the field read.
+                if (eventChannel == null)
                 {
                     return;
                 }
 
                 try
                 {
-                    // Block until queue is not full.
-                    while (eventQueue.Count >= _queueCapacity)
+                    // Fast path: try to write without blocking. When the bounded channel
+                    // is full, fall back to a synchronous wait on WriteAsync which honors
+                    // BoundedChannelFullMode.Wait — equivalent to the previous
+                    // dequeueEvent.WaitOne() backpressure loop.
+                    if (!eventChannel.Writer.TryWrite(buildEvent))
                     {
-                        // Block and wait for dequeue event.
-                        dequeueEvent.WaitOne();
+                        eventChannel.Writer.WriteAsync(buildEvent).AsTask().GetAwaiter().GetResult();
                     }
-
-                    eventQueue.Enqueue(buildEvent);
-                    enqueueEvent.Set();
+                }
+                catch (ChannelClosedException)
+                {
+                    // Shutdown completed the channel after we captured the reference;
+                    // silently drop the event.
+                    return;
                 }
                 catch (ObjectDisposedException)
                 {
-                    // Shutdown disposed the wait handles after we captured them;
-                    // silently drop the event.
+                    // Defensive: matches prior behavior for races with shutdown.
                     return;
                 }
             }
@@ -1350,7 +1348,7 @@ namespace Microsoft.Build.BackEnd.Logging
         /// </summary>
         public void WaitForLoggingToProcessEvents()
         {
-            while (_eventQueue?.IsEmpty == false)
+            while ((_eventChannel?.Reader.Count ?? 0) > 0)
             {
                 _emptyQueueEvent?.WaitOne();
             }
@@ -1409,10 +1407,20 @@ namespace Microsoft.Build.BackEnd.Logging
         /// </summary>
         private void StartLoggingEventProcessing()
         {
-            _eventQueue = new ConcurrentQueue<object>();
-            _dequeueEvent = new AutoResetEvent(false);
+            // Bounded channel with FullMode.Wait reproduces the previous
+            // dequeueEvent-based backpressure: producers block when the queue
+            // reaches _queueCapacity. SingleReader=true keeps the existing
+            // single drain-thread invariant; this is the seam where multi-drain
+            // sharding will be introduced (msbuild#62 follow-up).
+            int capacity = (int)Math.Min((uint)int.MaxValue, Math.Max(1u, _queueCapacity));
+            _eventChannel = Channel.CreateBounded<object>(new BoundedChannelOptions(capacity)
+            {
+                FullMode = BoundedChannelFullMode.Wait,
+                SingleReader = true,
+                SingleWriter = false,
+                AllowSynchronousContinuations = false,
+            });
             _emptyQueueEvent = new ManualResetEvent(false);
-            _enqueueEvent = new AutoResetEvent(false);
             _loggingEventProcessingCancellation = new CancellationTokenSource();
 
             _loggingEventProcessingThread = new Thread(LoggingEventProc);
@@ -1422,43 +1430,70 @@ namespace Microsoft.Build.BackEnd.Logging
 
             void LoggingEventProc()
             {
-                var completeAdding = _loggingEventProcessingCancellation.Token;
-                WaitHandle[] waitHandlesForNextEvent = [completeAdding.WaitHandle, _enqueueEvent];
+                CancellationToken completeAdding = _loggingEventProcessingCancellation.Token;
 
                 try
                 {
-                    // Store field references locally to prevent race with cleanup
-                    var eventQueue = _eventQueue;
-                    var dequeueEvent = _dequeueEvent;
-                    var emptyQueueEvent = _emptyQueueEvent;
-                    var enqueueEvent = _enqueueEvent;
+                    Channel<object> eventChannel = _eventChannel;
+                    ManualResetEvent emptyQueueEvent = _emptyQueueEvent;
+                    ChannelReader<object> reader = eventChannel.Reader;
 
-                    do
+                    while (true)
                     {
-                        if (eventQueue.TryDequeue(out object ev))
+                        if (reader.TryRead(out object ev))
                         {
                             LoggingEventProcessor(ev);
-                            dequeueEvent?.Set();
+                            continue;
                         }
-                        else
+
+                        // Queue is empty. Signal waiters, then wait for the next event,
+                        // for cancellation, or for the channel to be completed.
+                        emptyQueueEvent?.Set();
+
+                        if (completeAdding.IsCancellationRequested)
                         {
-                            emptyQueueEvent?.Set();
-
-                            // Wait for next event, or finish.
-                            if (!completeAdding.IsCancellationRequested && eventQueue.IsEmpty)
+                            // Drain any items written after the empty check but before cancel was observed.
+                            if (reader.TryRead(out object pending))
                             {
-                                WaitHandle.WaitAny(waitHandlesForNextEvent);
+                                emptyQueueEvent?.Reset();
+                                LoggingEventProcessor(pending);
+                                continue;
                             }
-
-                            emptyQueueEvent.Reset();
+                            break;
                         }
-                    } while (!eventQueue.IsEmpty || !completeAdding.IsCancellationRequested);
 
-                    emptyQueueEvent.Set();
+                        ValueTask<bool> waitTask = reader.WaitToReadAsync(completeAdding);
+                        bool hasMore;
+                        try
+                        {
+                            hasMore = waitTask.IsCompleted
+                                ? waitTask.Result
+                                : waitTask.AsTask().GetAwaiter().GetResult();
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            hasMore = false;
+                        }
+
+                        if (!hasMore)
+                        {
+                            // Channel completed or cancellation requested; drain remaining items if any.
+                            while (reader.TryRead(out object remaining))
+                            {
+                                emptyQueueEvent?.Reset();
+                                LoggingEventProcessor(remaining);
+                            }
+                            break;
+                        }
+
+                        emptyQueueEvent?.Reset();
+                    }
+
+                    emptyQueueEvent?.Set();
                 }
                 catch (ObjectDisposedException)
                 {
-                    // Events/queue were disposed during shutdown, exit processing
+                    // Channel/events were disposed during shutdown, exit processing
                     return;
                 }
             }
@@ -1470,15 +1505,18 @@ namespace Microsoft.Build.BackEnd.Logging
         private void CleanLoggingEventProcessing()
         {
             _loggingEventProcessingCancellation?.Cancel();
-            _dequeueEvent?.Dispose();
-            _enqueueEvent?.Dispose();
+            try
+            {
+                _eventChannel?.Writer.TryComplete();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Already disposed; nothing to do.
+            }
             _emptyQueueEvent?.Dispose();
             _loggingEventProcessingCancellation?.Dispose();
 
-            _eventQueue = null;
-
-            _dequeueEvent = null;
-            _enqueueEvent = null;
+            _eventChannel = null;
             _emptyQueueEvent = null;
 
             _loggingEventProcessingCancellation = null;
