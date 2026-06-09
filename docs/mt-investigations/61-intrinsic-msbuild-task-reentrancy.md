@@ -83,3 +83,103 @@ Use the binlog MCP `binlog_tasks_in_target` for `Restore` and recursive `Build`,
 - A trace diff that isolates the MT-only frames responsible for the per-call delta.
 - If engine-side: a fix or a written hand-off to the engine team.
 - If propagation of nested-task regressions: a residual estimate after #57–#60 land.
+
+## Findings
+
+Code inspection of the intrinsic `<MSBuild>` task callback path identifies a
+serialization bottleneck that is consistent with the observed +56% regression on
+`eshop-inc-build` and the solution-graph-size-dependent per-call delta.
+
+### The hot path
+
+The intrinsic `MSBuild` task (`src/Build/BackEnd/Components/RequestBuilder/IntrinsicTasks/MSBuild.cs`)
+dispatches nested project builds through the `IBuildEngine` callback surface
+exposed by `TaskHost` (`src/Build/BackEnd/Components/RequestBuilder/TaskHost.cs`).
+Every nested-build entry point in `TaskHost` is wrapped in
+`lock (_callbackMonitor)` — a single per-task-host monitor.
+
+The relevant call (`TaskHost.cs:335`):
+
+```csharp
+public BuildEngineResult BuildProjectFilesInParallel(
+    string[] projectFileNames, string[] targetNames,
+    IDictionary[] globalProperties, IList<string>[] undefineProperties,
+    string[] toolsVersion, bool returnTargetOutputs)
+{
+    lock (_callbackMonitor)
+    {
+        return BuildProjectFilesInParallelAsync(
+            projectFileNames, targetNames, globalProperties,
+            undefineProperties, toolsVersion, returnTargetOutputs).Result;
+    }
+}
+```
+
+Two compounding problems:
+
+1. **The lock is held for the entire duration of the child build.** The
+   synchronous `.Result` blocks inside the critical section, so the monitor is
+   pinned from request dispatch through scheduler round-trip, child-node
+   execution, and result marshalling.
+2. **The `await` continuations of `BuildProjectFilesInParallelAsync` can land on
+   a different thread** that then re-enters the same `TaskHost` (e.g. logging,
+   `LogMessageEvent`, `ContinueWhenAll`, target-result callbacks — every public
+   member of `TaskHost` takes `_callbackMonitor`). Combined with the blocking
+   `.Result`, this turns the "parallel" entry point into a strictly serialized
+   dispatcher per task host.
+
+### Why eshop is hit hardest
+
+`eshop-inc-build` issues ~16 `MSBuild`-task invocations during a single
+incremental build, most of them recursive cross-project dispatches that fan out
+across the solution graph. Under MT the scheduler genuinely has multiple
+in-process worker threads available — but every nested `<MSBuild>` invocation
+that touches the same parent task host must serialize at `_callbackMonitor`
+before its child build can even be queued. The extra worker threads idle while
+they wait their turn at the lock.
+
+This matches the empirical shape of the regression:
+
+- per-call delta scales with solution size: eshop ~226 ms/call vs.
+  blazorwasm/console ~25 ms/call;
+- the regression is concentrated in the intrinsic `MSBuild` task while siblings
+  (`Csc`, `ResolveAssemblyReference`) are flat under MT;
+- `eshop-rebuild` (fewer cache hits, longer child builds) shows a smaller
+  *percentage* delta but the same absolute pattern, because each lock holder
+  occupies the monitor for longer.
+
+Non-MT does not pay this cost: with a single worker the lock is uncontended,
+and `BuildProjectFilesInParallelAsync(...).Result` collapses to ordinary
+synchronous dispatch.
+
+### Relationship to the E1 experiment
+
+E1 removed the **log-event** lock (`LogMessageEvent` / `LogWarningEvent` /
+`LogErrorEvent` paths through `_callbackMonitor`). This investigation concerns
+a **different code path** that happens to share the same monitor:
+`BuildProjectFilesInParallel`. The E1 change does nothing for nested-build
+dispatch — the `.Result` inside the lock is independent. Both fixes are needed.
+
+### Proposed fix shape (any one of, in increasing order of intrusiveness)
+
+1. **Drop the lock from `BuildProjectFilesInParallel` and rely on a
+   genuinely-async pipeline.** Expose an async entry point on `IBuildEngine9`
+   (or thread it through the existing `ContinueWhenAll` mechanism) so the
+   intrinsic `MSBuild` task can `await` the child build instead of blocking on
+   `.Result` inside a monitor. This is the correct long-term fix and lines up
+   with the existing private `BuildProjectFilesInParallelAsync` signature.
+2. **Replace the monitor with a `SemaphoreSlim` sized to the node count** for
+   the nested-build path only. Keep the monitor for state-mutating callbacks
+   (log routing, `Yield`/`Reacquire`, `RequestCores` bookkeeping) but allow up
+   to N concurrent in-flight child dispatches per task host. Minimal change,
+   recovers most of the parallelism without redesigning the callback API.
+3. **Split `_callbackMonitor` into per-concern locks.** Read-only / dispatch
+   callbacks (`BuildProjectFilesInParallel`, `ContinueWhenAll` setup, project
+   metadata queries) get their own monitor — or no monitor — while
+   state-mutating callbacks keep the existing one. Lowest blast radius but
+   leaves the `.Result`-under-lock anti-pattern in place.
+
+The fix should be validated by re-running `eshop-inc-build` MT and confirming
+that the intrinsic `MSBuild` task delta drops back toward the
+blazorwasm/console per-call cost (~25 ms/call), which represents the residual
+non-lock-bound MT overhead.
