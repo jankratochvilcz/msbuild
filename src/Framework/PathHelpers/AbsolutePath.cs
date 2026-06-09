@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
+using System.Collections.Concurrent;
 #if NETFRAMEWORK
 using Microsoft.IO;
 #else
@@ -27,6 +28,20 @@ namespace Microsoft.Build.Framework
         /// The string comparer to use for path comparisons, based on OS file system case sensitivity.
         /// </summary>
         private static readonly StringComparer s_pathComparer = NativeMethods.IsFileSystemCaseSensitive ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase;
+
+        /// <summary>
+        /// Process-wide cache mapping raw input paths to their <see cref="System.IO.Path.GetFullPath(string)"/> result.
+        /// Keyed on the original input string (ordinal) since <see cref="GetCanonicalForm"/> is a pure function of <see cref="Value"/>
+        /// and <c>GetFullPath</c> dominates ITaskItem absolutization on the hot path (especially on Windows, where it performs
+        /// case-folding and root resolution work).
+        /// </summary>
+        private static readonly ConcurrentDictionary<string, string> s_canonicalCache = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Soft cap on cached canonical entries. On overflow the cache is cleared — correctness is preserved
+        /// (worst case is re-population), and the bound prevents unbounded growth in long-lived processes.
+        /// </summary>
+        private const int CanonicalCacheMaxEntries = 50_000;
 
         /// <summary>
         /// The normalized string representation of this path.
@@ -188,7 +203,25 @@ namespace Microsoft.Build.Framework
         /// </remarks>
         internal AbsolutePath GetCanonicalForm()
         {
-            return new AbsolutePath(System.IO.Path.GetFullPath(Value), OriginalValue, ignoreRootedCheck: true);
+            if (string.IsNullOrEmpty(Value))
+            {
+                // Preserve existing throw behavior (e.g. ArgumentNullException from Path.GetFullPath(null)).
+                return new AbsolutePath(System.IO.Path.GetFullPath(Value), OriginalValue, ignoreRootedCheck: true);
+            }
+
+            if (!s_canonicalCache.TryGetValue(Value, out string? canonical))
+            {
+                canonical = System.IO.Path.GetFullPath(Value);
+
+                if (s_canonicalCache.Count > CanonicalCacheMaxEntries)
+                {
+                    s_canonicalCache.Clear();
+                }
+
+                s_canonicalCache.TryAdd(Value, canonical);
+            }
+
+            return new AbsolutePath(canonical, OriginalValue, ignoreRootedCheck: true);
         }
 
         /// <summary>
