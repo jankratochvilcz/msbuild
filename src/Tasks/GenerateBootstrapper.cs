@@ -4,7 +4,6 @@
 #if NETFRAMEWORK
 using System;
 using System.Collections.Generic;
-using System.IO;
 using Microsoft.Build.Tasks.Deployment.Bootstrapper;
 #endif
 
@@ -20,8 +19,11 @@ namespace Microsoft.Build.Tasks
     /// Generates a bootstrapper for ClickOnce deployment projects.
     /// </summary>
     [Microsoft.Build.Framework.MSBuildMultiThreadableTask]
-    public sealed class GenerateBootstrapper : TaskExtension, IGenerateBootstrapperTaskContract
+    public sealed class GenerateBootstrapper : TaskExtension, IGenerateBootstrapperTaskContract, IMultiThreadableTask
     {
+        public TaskEnvironment TaskEnvironment { get; set; } = TaskEnvironment.Fallback;
+
+
         public string ApplicationName { get; set; }
 
         public string ApplicationFile { get; set; }
@@ -42,7 +44,7 @@ namespace Microsoft.Build.Tasks
 
         public string FallbackCulture { get; set; } = Util.DefaultCultureInfo.Name;
 
-        public string OutputPath { get; set; } = Directory.GetCurrentDirectory();
+        public string OutputPath { get; set; }
 
         public string Path { get; set; }
 
@@ -69,10 +71,12 @@ namespace Microsoft.Build.Tasks
                 Path = Util.GetDefaultPath(VisualStudioVersion);
             }
 
+            string effectiveOutputPath = OutputPath ?? TaskEnvironment.ProjectDirectory;
+
             var bootstrapperBuilder = new BootstrapperBuilder
             {
                 Validate = Validate,
-                Path = Path
+                Path = TaskEnvironment.GetAbsolutePath(Path)
             };
 
             ProductCollection products = bootstrapperBuilder.Products;
@@ -88,7 +92,7 @@ namespace Microsoft.Build.Tasks
                 CopyComponents = CopyComponents,
                 Culture = Culture,
                 FallbackCulture = FallbackCulture,
-                OutputPath = OutputPath,
+                OutputPath = TaskEnvironment.GetAbsolutePath(effectiveOutputPath),
                 SupportUrl = SupportUrl
             };
 
