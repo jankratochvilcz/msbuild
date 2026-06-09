@@ -334,10 +334,18 @@ namespace Microsoft.Build.BackEnd
         /// <returns>A structure containing the result of the build, success or failure and the list of target outputs per project</returns>
         public BuildEngineResult BuildProjectFilesInParallel(string[] projectFileNames, string[] targetNames, System.Collections.IDictionary[] globalProperties, IList<String>[] undefineProperties, string[] toolsVersion, bool returnTargetOutputs)
         {
+            // Hold _callbackMonitor only for the synchronous dispatch prelude that mutates
+            // shared TaskHost state and queues the child build requests. Releasing the lock
+            // before awaiting the nested build prevents serialization of all nested <MSBuild>
+            // calls under multi-threaded scheduling — every concurrent invocation would
+            // otherwise block here on the .Result of a long-running child build. See #61.
+            Task<BuildEngineResult> resultTask;
             lock (_callbackMonitor)
             {
-                return BuildProjectFilesInParallelAsync(projectFileNames, targetNames, globalProperties, undefineProperties, toolsVersion, returnTargetOutputs).Result;
+                resultTask = BuildProjectFilesInParallelAsync(projectFileNames, targetNames, globalProperties, undefineProperties, toolsVersion, returnTargetOutputs);
             }
+
+            return resultTask.GetAwaiter().GetResult();
         }
 
         /// <summary>
