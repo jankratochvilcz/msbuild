@@ -122,3 +122,21 @@ workstream risks chasing false positives.
 Once the YAML / pipeline change is finalized, the real PR will be opened against the
 Azure DevOps `dotnet-perfstar` repo (DevDiv organization). This GitHub PR remains as the
 public planning record so the issue has a linked tracking artifact.
+
+## Implementation landed
+
+Pipeline sketch committed to `dotnet-perfstar` (Azure DevOps, DevDiv):
+
+- Branch: `mt/e2e3-ci-validation`
+- Commit: `429676cd43b3587a5c477bed4e3344364bcfa52b`
+- New files:
+  - `pipeline/mt-experimental-validation.yml` — stage that takes a
+    `jankratochvilcz/msbuild` branch input (default `mt/gate-projectdirectory-setter`
+    = PR #66), bootstraps it via `./build.sh -c Release /p:CreateBootstrap=true`,
+    points `DOTNET` at the bootstrap, and runs the fast scenario subset
+    (`net8-console-app-rebuild-dotnet`, `net8-console-app-inc-build-dotnet`) before
+    ingesting + comparing to the prod baseline.
+  - `documentation/mt-experimental-validation.md` — usage notes.
+
+Dependency-pipeline trigger from a `jankratochvilcz/msbuild` push is left as a TODO
+in the YAML; for now the pipeline is invoked manually with the branch parameter.
