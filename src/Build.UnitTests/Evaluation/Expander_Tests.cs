@@ -249,6 +249,51 @@ namespace Microsoft.Build.UnitTests.Evaluation
         }
 
         /// <summary>
+        /// Customer-pattern guard: a metadata transform piped into <c>Distinct()</c>, where the
+        /// transform collapses multiple source items down to fewer (not one) distinct identities.
+        /// Matches the shape dotnet/arcade's GenAPI targets use to derive unique reference
+        /// directories from a reference-path item list:
+        /// <code>&lt;_Dirs Include="@(Ref-&gt;'%(RootDir)%(Directory)'-&gt;Distinct())" /&gt;</code>
+        /// Three source items with two distinct parent directories must collapse to two items,
+        /// in first-occurrence order, so downstream search paths stay deterministic.
+        ///
+        /// Relevant impl: <c>Expander.ItemTransformFunctions.Distinct</c> /
+        /// <c>DistinctWithComparer</c> in <c>Expander.cs</c> — dedup uses a
+        /// <c>HashSet&lt;string&gt;</c> keyed on the transformed <c>item.Key</c> and relies on
+        /// enumeration order for the first-occurrence guarantee.
+        /// </summary>
+        [Fact]
+        public void ExpandItemVectorFunctionsTransformThenDistinctPreservesOrder()
+        {
+            ProjectInstance project = ProjectHelpers.CreateEmptyProjectInstance();
+            PropertyDictionary<ProjectPropertyInstance> pg = new PropertyDictionary<ProjectPropertyInstance>();
+            ItemDictionary<ProjectItemInstance> ig = new ItemDictionary<ProjectItemInstance>();
+
+            // Three Ref items: the first two share a parent directory, the third does not.
+            // After Distinct on the transformed parent-dir identity, two rows should survive in
+            // first-occurrence order.
+            string pkgADir = Path.Combine(s_rootPathPrefix, "pkgA", "lib", "netcoreapp") + Path.DirectorySeparatorChar;
+            string pkgBDir = Path.Combine(s_rootPathPrefix, "pkgB", "lib", "netcoreapp") + Path.DirectorySeparatorChar;
+            ig.Add(new ProjectItemInstance(project, "Ref", pkgADir + "a.dll", project.FullPath));
+            ig.Add(new ProjectItemInstance(project, "Ref", pkgADir + "b.dll", project.FullPath));
+            ig.Add(new ProjectItemInstance(project, "Ref", pkgBDir + "c.dll", project.FullPath));
+
+            Expander<ProjectPropertyInstance, ProjectItemInstance> expander =
+                new Expander<ProjectPropertyInstance, ProjectItemInstance>(pg, ig, new StringMetadataTable(null), FileSystems.Default);
+            ProjectItemInstanceFactory itemFactory = new ProjectItemInstanceFactory(project, "_Dir");
+
+            IList<ProjectItemInstance> result = expander.ExpandIntoItemsLeaveEscaped(
+                "@(Ref->'%(RootDir)%(Directory)'->Distinct())",
+                itemFactory,
+                ExpanderOptions.ExpandItems,
+                MockElementLocation.Instance);
+
+            result.Count.ShouldBe(2);
+            result[0].EvaluatedInclude.ShouldBe(pkgADir);
+            result[1].EvaluatedInclude.ShouldBe(pkgBDir);
+        }
+
+        /// <summary>
         /// Expand an item vector function Metadata()->DirectoryName()->Distinct()
         /// </summary>
         [Fact]
