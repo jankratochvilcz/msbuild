@@ -1,0 +1,22 @@
+# Fully-qualified test names already tracked as flake trackers (fork or upstream).
+# One per line; '#' starts a comment. Curate as you triage so the next run
+# focuses on genuinely new noise.
+
+# Tracked upstream — dotnet/msbuild#13734 (ToolTask drops final stdout/stderr after Wave18_6 EOF wait)
+Microsoft.Build.UnitTests.ToolTask_Tests.ToolTaskCanChangeCanonicalErrorFormat
+Microsoft.Build.UnitTests.ToolTask_Tests.OverrideStdOutImportanceToHigh
+
+# Tracked upstream — dotnet/msbuild#13762
+Microsoft.Build.UnitTests.BinaryLoggerTests.BinaryLoggerShouldEmbedFilesViaTaskOutput
+
+# Tracked upstream — dotnet/msbuild#13732 (multithreaded bootstrap, version-mismatch class)
+# (test family — extend as specific names recur)
+
+# Tracked upstream — dotnet/msbuild#13667 (currently skipped on CI via #13668)
+Microsoft.Build.UnitTests.ToolTask_Tests.ToolTaskThatTimeoutAndRetry
+
+# Tracked in fork — jankratochvilcz/msbuild#48
+Microsoft.Build.UnitTests.FileStateTests.LastWriteTimeUtcOnDirectory
+
+# Tracked in fork — jankratochvilcz/msbuild#49
+Microsoft.Build.Engine.UnitTests.NetTaskHost_E2E_Tests.NetTaskHost_SymlinkedSdkPath_ShouldNotCauseMSB4216
