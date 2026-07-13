@@ -1,0 +1,103 @@
+name: MTP + CTS hang demo (Linux vs Windows)
+
+# Demonstrates that xUnit v3 + Microsoft.Testing.Platform (MTP), driven by a
+# CTS-style harness that launches the test host with redirected streams and
+# reads its output to EOF, COMPLETES on Linux but HANGS on Windows.
+#
+# Root cause: an MSBuild-style unit test spawns a child process. On Windows,
+# Process.Start with redirected streams sets bInheritHandles=TRUE, so the
+# grandchild inherits the host->driver output pipe handle and the driver's
+# read never reaches EOF. On Linux the handle is close-on-exec, so the
+# grandchild does not inherit it and the read completes.
+#
+# A green run == hypothesis confirmed (Linux completes, Windows hangs).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  demo:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+        working-directory: .mtp-cts-demo
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build MTP test host
+        run: dotnet build Repro.Tests/Repro.Tests.csproj -c Release -nologo
+
+      - name: Build mini-cts harness
+        run: dotnet build Harness/Harness.csproj -c Release -nologo
+
+      - name: Locate binaries
+        id: paths
+        run: |
+          echo "host=Repro.Tests/bin/Release/net10.0/Repro.Tests.dll" >> "$GITHUB_OUTPUT"
+          echo "harness=Harness/bin/Release/net10.0/mini-cts.dll" >> "$GITHUB_OUTPUT"
+
+      # Control: an ordinary test that spawns NO child. Must COMPLETE on both OSes.
+      - name: Run control (no child spawned)
+        id: control
+        env:
+          REPRO_SPAWN_CHILD: "0"
+        run: |
+          set +e
+          dotnet "${{ steps.paths.outputs.harness }}" "${{ steps.paths.outputs.host }}"
+          echo "exit=$?" >> "$GITHUB_OUTPUT"
+
+      # The real experiment: a test spawns a lingering, handle-inheriting child.
+      - name: Run with lingering child spawned
+        id: withchild
+        run: |
+          set +e
+          dotnet "${{ steps.paths.outputs.harness }}" "${{ steps.paths.outputs.host }}"
+          echo "exit=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Verdict
+        run: |
+          control_exit="${{ steps.control.outputs.exit }}"
+          withchild_exit="${{ steps.withchild.outputs.exit }}"
+          echo "OS=${{ matrix.os }}  control_exit=$control_exit  withchild_exit=$withchild_exit"
+          echo "(exit 0 = COMPLETED, exit 2 = HANG DETECTED)"
+          echo
+
+          # Control must always complete.
+          if [ "$control_exit" != "0" ]; then
+            echo "::error::Control run did not complete (exit $control_exit) -- unexpected."
+            exit 1
+          fi
+
+          case "${{ matrix.os }}" in
+            ubuntu-latest)
+              if [ "$withchild_exit" = "0" ]; then
+                echo "PASS: Linux COMPLETED with the lingering child (close-on-exec, no inherited handle)."
+              else
+                echo "::error::Linux did NOT complete (exit $withchild_exit) -- hypothesis not confirmed."
+                exit 1
+              fi
+              ;;
+            windows-latest)
+              if [ "$withchild_exit" = "2" ]; then
+                echo "PASS: Windows HANG reproduced (grandchild inherited the pipe handle, read never hit EOF)."
+              else
+                echo "::error::Windows did NOT hang (exit $withchild_exit) -- hypothesis not confirmed on this runner."
+                exit 1
+              fi
+              ;;
+          esac

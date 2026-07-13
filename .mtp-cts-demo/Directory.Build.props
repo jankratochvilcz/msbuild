@@ -1,0 +1,11 @@
+<!--
+  Empty Directory.Build.props to ISOLATE this demo from the msbuild repo's
+  root Directory.Build.props (which imports the Arcade SDK and would otherwise
+  turn this tiny demo into a full-repo build).
+-->
+<Project>
+  <PropertyGroup>
+    <!-- The repo root enables Central Package Management; opt this isolated demo out. -->
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+</Project>

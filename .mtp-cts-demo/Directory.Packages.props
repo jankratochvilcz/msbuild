@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <!-- Stops NuGet from walking up to the repo-root Directory.Packages.props. -->
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+</Project>
